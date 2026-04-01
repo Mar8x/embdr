@@ -190,6 +190,14 @@ Edit `config.toml`:
 
 After changing the embedding model or chunk parameters, run `embd rebuild`.
 
+### OCR
+
+Embedded images in PDFs and DOCX files can be OCR'd during ingestion. Install `embd[ocr]` for Surya (high-quality, MPS/CUDA) or `embd[ocr-cpu]` + Tesseract for CPU/Docker. The `ocr_embedded_images` setting in `config.toml` controls when OCR runs: `"when_no_text"` (default — only scanned pages), `"always"`, or `"never"`.
+
+### Web search (SearXNG)
+
+Optional web search is available in `embd query` and `embd shell` (CLI/TUI) via a SearXNG instance. It is **not** used by `embd serve` or the ChatGPT Actions API. Configure the URL in the `[search]` section of `config.toml`.
+
 ### LLM backends
 
 - **MLX** (Apple Silicon only): `pip install 'embd[mlx]'`. Models download on first use.
@@ -205,6 +213,8 @@ After changing the embedding model or chunk parameters, run `embd rebuild`.
 | `HF_TOKEN` | Never (optional) | Silences HuggingFace warnings |
 
 ## Retrieval API
+
+Retrieval is straight top-k cosine vector search with no reranking step — if recall feels low, increase `top_k` in `config.toml`.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|

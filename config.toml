@@ -55,14 +55,15 @@ model_name = "BAAI/bge-m3"
 device     = "auto"
 
 [retrieval]
-# top_k: how many chunks to retrieve per query (5 × 800 chars ≈ 4 KB of context).
+# top_k: how many chunks to retrieve per query (5 × 2000 chars ≈ 10 KB of context).
 top_k           = 5
 collection_name = "documents"
 
 [llm]
 # backend: "mlx" (Apple Silicon only — requires pip install 'embd[mlx]'),
 #          "ollama" (any platform), or "claude" (API, any platform)
-backend     = "mlx" #"claude" #"mlx"
+# Apple Silicon: change to "mlx" and install embd[mlx]
+backend     = "ollama"
 
 # --- MLX settings (used when backend = "mlx") ---
 # Model is downloaded once from HuggingFace to ~/.cache/huggingface/ on first run.
