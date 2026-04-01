@@ -223,6 +223,10 @@ Retrieval is straight top-k cosine vector search with no reranking step — if r
 | GET | `/openapi.json` | None | OpenAPI schema (import into ChatGPT) |
 | GET | `/docs` | None | Swagger UI |
 
+## Data privacy
+
+Your documents never leave your machine — embeddings and vector search run locally. However, ChatGPT receives the retrieved text snippets as part of each query. On personal ChatGPT plans, standard OpenAI data terms apply to those snippets; ChatGPT Team and Enterprise plans have stronger data handling commitments and no training on your data. Choose what you index accordingly, and review OpenAI's current data policies for your plan before indexing sensitive material.
+
 ## License
 
 MIT
