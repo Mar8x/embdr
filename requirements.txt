@@ -1,0 +1,26 @@
+pymupdf>=1.24.0
+sentence-transformers>=3.3.0
+chromadb>=0.5.23
+psutil>=6.0
+click>=8.1.8
+textual>=0.68.0
+anthropic>=0.37.1
+httpx>=0.25.0
+beautifulsoup4>=4.12.0
+ebooklib>=0.18
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-dotenv>=1.0.0
+watchdog>=4.0.0
+
+# Optional (Apple Silicon only)
+# mlx-lm>=0.21.0
+
+# Optional (document types)
+# python-docx>=1.1.0    # .docx support
+# openpyxl>=3.1.0       # .xlsx support
+
+# Optional (image OCR in PDF and DOCX)
+# surya-ocr>=0.17         # high-quality GPU OCR (MPS / CUDA) via embd[ocr]
+# pytesseract>=0.3.10     # CPU OCR fallback (also needs system Tesseract)
+# Pillow>=10.0.0          # needed by both OCR backends

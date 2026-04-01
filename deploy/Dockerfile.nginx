@@ -1,0 +1,11 @@
+# nginx reverse proxy with IP whitelisting + daily OpenAI CIDR refresh
+FROM nginx:1-alpine
+
+RUN apk add --no-cache curl jq openssl
+
+COPY nginx.conf.template /etc/nginx/nginx.conf.template
+COPY update-openai-ips.sh /usr/local/bin/update-openai-ips.sh
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /usr/local/bin/update-openai-ips.sh /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

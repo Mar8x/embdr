@@ -1,0 +1,65 @@
+@startuml deploy-flow
+!theme plain
+skinparam backgroundColor white
+skinparam defaultFontName "Helvetica"
+skinparam shadowing false
+
+title embd — Docker Compose Deployment
+
+actor "ChatGPT / Client" as client
+
+node "Docker Compose" as compose {
+
+  rectangle "nginx container" as nginx {
+    component "IP Whitelist\n(geo module)" as ipcheck
+    component "Bearer Token\nVerification" as authcheck
+    component "Reverse Proxy" as proxy
+    component "Daily Cron\n(03:00 UTC)" as cron
+  }
+
+  rectangle "embd container" as embd {
+    component "FastAPI\n(embd serve)" as api
+    component "Encoder\n(warmed)" as encoder
+    component "File Watcher" as watcher
+  }
+
+  database "ChromaDB\n(volume)" as chroma
+  collections "documents/\n(volume)" as docs
+}
+
+file "openai-ips.conf\n(auto-generated)" as openai_ips
+file "custom-ips.conf\n(manual)" as custom_ips
+cloud "openai.com\n/chatgpt-connectors.json" as openai_api
+file ".env\n(EMBD_API_KEY\nANTHROPIC_API_KEY)" as dotenv
+file "deploy/certs/\n(TLS cert + key)" as certs
+
+client --> ipcheck : HTTPS request
+ipcheck --> authcheck : IP allowed
+authcheck --> proxy : Bearer valid
+proxy --> api : proxy_pass :8000
+
+api --> encoder
+api --> chroma
+watcher --> docs : monitors
+watcher --> chroma : upsert/delete
+
+cron --> openai_api : "curl (daily)"
+cron --> openai_ips : writes
+openai_ips --> ipcheck : include
+custom_ips --> ipcheck : include
+certs --> nginx
+dotenv --> compose
+
+note right of ipcheck
+  403 if IP not in
+  openai-ips.conf or
+  custom-ips.conf
+end note
+
+note right of authcheck
+  401 if Bearer token
+  does not match
+  EMBD_API_KEY
+end note
+
+@enduml

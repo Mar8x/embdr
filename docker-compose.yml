@@ -1,0 +1,84 @@
+# embd — production stack: nginx (IP whitelist + Bearer auth) → embd serve
+#
+# Usage:
+#   1. Copy .env.example to .env and fill in EMBD_API_KEY + ANTHROPIC_API_KEY
+#   2. Run: ./deploy/update-openai-ips.sh       (seed OpenAI IP allowlist)
+#   3. Edit deploy/custom-ips.conf               (add your own IPs)
+#   4. TLS: see README (Let’s Encrypt section) or set
+#      ALLOW_SELF_SIGNED=1 for local dev (writes PEMs under CERT_HOST_PATH).
+#   5. docker compose up -d
+#
+# Let’s Encrypt on the host: this file alone does NOT mount /etc/letsencrypt — nginx
+# only sees ./deploy/certs (or CERT_HOST_PATH). For live/ symlinks from Certbot you must
+# also merge deploy/docker-compose.le.yml (see COMPOSE_FILE in .env.example) or pass:
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.le.yml up -d
+#
+# Production example (ChatGPT Actions requires port 443):
+#   EMBD_LISTEN_PORT=443
+#   EMBD_LISTEN_HTTP=8099   # host → container 80; use a free port if host 80 is taken
+#   EMBD_PUBLIC_HOST=embd.example.com
+#   EMBD_REDIRECT_TO_HTTPS=https://embd.example.com
+#   ALLOW_SELF_SIGNED=0
+#   Then either:
+#   - Merge deploy/docker-compose.le.yml (mounts /etc/letsencrypt) and set
+#     EMBD_TLS_FULLCHAIN / EMBD_TLS_PRIVKEY in .env, or
+#   - Copy PEMs (e.g. cp -L from live/) into CERT_HOST_PATH and use defaults.
+#
+# The nginx container refreshes OpenAI's IP list daily at 03:00 UTC.
+#
+# embd warms the embedding model at startup (often 15s–2m on CPU). Without a healthcheck,
+# nginx can start first and return 502 until Uvicorn is listening — see depends_on below.
+
+services:
+  embd:
+    build: .
+    volumes:
+      - ./documents:/app/documents
+      - ./chroma_db:/app/chroma_db
+      - ./config.toml:/app/config.toml:ro
+    environment:
+      - EMBD_API_KEY=${EMBD_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      # OpenAPI `servers` for ChatGPT Actions (import https://…/openapi.json)
+      - EMBD_OPENAPI_BASE_URL
+    expose:
+      - "8000"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)",
+        ]
+      interval: 5s
+      timeout: 6s
+      retries: 12
+      start_period: 180s
+
+  nginx:
+    build:
+      context: ./deploy
+      dockerfile: Dockerfile.nginx
+    ports:
+      - "${EMBD_LISTEN_PORT:-443}:443"
+      - "${EMBD_LISTEN_HTTP:-80}:80"
+    volumes:
+      - ./deploy/openai-ips.conf:/etc/nginx/conf.d/openai-ips.conf
+      - ./deploy/custom-ips.conf:/etc/nginx/conf.d/custom-ips.conf:ro
+      # Writable dir for dev self-signed PEMs; prod may use deploy/docker-compose.le.yml instead
+      - ${CERT_HOST_PATH:-./deploy/certs}:/etc/nginx/certs
+    environment:
+      - EMBD_API_KEY=${EMBD_API_KEY}
+      - EMBD_PUBLIC_HOST=${EMBD_PUBLIC_HOST:-_}
+      - EMBD_REDIRECT_TO_HTTPS=${EMBD_REDIRECT_TO_HTTPS:-https://127.0.0.1}
+      # Optional — set with deploy/docker-compose.le.yml
+      - EMBD_TLS_FULLCHAIN
+      - EMBD_TLS_PRIVKEY
+      # Dev: 1 = generate self-signed when no PEMs at EMBD_TLS_* paths. Production: 0
+      - ALLOW_SELF_SIGNED=${ALLOW_SELF_SIGNED:-1}
+    depends_on:
+      embd:
+        condition: service_healthy
+    restart: unless-stopped

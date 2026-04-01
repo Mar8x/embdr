@@ -1,0 +1,98 @@
+worker_processes auto;
+error_log /var/log/nginx/error.log warn;
+pid       /var/run/nginx.pid;
+
+events {
+    worker_connections 256;
+}
+
+http {
+    log_format main '$remote_addr - $remote_user [$time_local] '
+                    '"$request" $status $body_bytes_sent '
+                    '"$http_referer" "$http_user_agent"';
+    access_log /var/log/nginx/access.log main;
+
+    upstream embd_backend {
+        server embd:8000;
+    }
+
+    # IP allowlist: geo maps client IP to 1 (allowed) or 0 (denied).
+    # Sources: OpenAI ChatGPT Actions CIDRs + your custom IPs.
+    geo $ip_allowed {
+        default 0;
+        include /etc/nginx/conf.d/openai-ips.conf;
+        include /etc/nginx/conf.d/custom-ips.conf;
+    }
+
+    # Per-IP rate limit: 10 req/s sustained, burst absorbs short spikes.
+    limit_req_zone $binary_remote_addr zone=embd_api:10m rate=10r/s;
+
+    # HTTP → HTTPS (DNS-01 / Let’s Encrypt does not need this listener for issuance;
+    # optional if you expose port 80 publicly.)
+    server {
+        listen 80;
+        server_name ${EMBD_PUBLIC_HOST};
+        return 301 ${EMBD_REDIRECT_TO_HTTPS}$request_uri;
+    }
+
+    server {
+        listen 443 ssl;
+        server_name ${EMBD_PUBLIC_HOST};
+
+        # TLS paths come from envsubst (defaults: /etc/nginx/certs/*.pem; or /etc/letsencrypt/live/…)
+        ssl_certificate     ${EMBD_TLS_FULLCHAIN};
+        ssl_certificate_key ${EMBD_TLS_PRIVKEY};
+        ssl_protocols       TLSv1.2 TLSv1.3;
+        ssl_ciphers         HIGH:!aNULL:!MD5;
+
+        # ── Health check (IP allowlist, no Bearer — Docker healthcheck bypasses nginx) ──
+        location = /health {
+            if ($ip_allowed = 0) {
+                return 403 '{"error":"forbidden","detail":"IP not in allowlist"}';
+            }
+            limit_req zone=embd_api burst=30 nodelay;
+            proxy_pass http://embd_backend;
+            proxy_set_header   Host              $http_host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header   X-Forwarded-Host  $http_host;
+        }
+
+        # ── OpenAPI schema (IP allowlist only — no Bearer; needed for GPT import)
+        # Forward Host (with port) so OpenAPI `servers` can match the public URL.
+        location = /openapi.json {
+            if ($ip_allowed = 0) {
+                return 403 '{"error":"forbidden","detail":"IP not in allowlist"}';
+            }
+            limit_req zone=embd_api burst=30 nodelay;
+            proxy_pass http://embd_backend;
+            proxy_set_header   Host              $http_host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header   X-Forwarded-Host  $http_host;
+            proxy_read_timeout 120s;
+        }
+
+        # ── All other routes: IP allowlist + Bearer auth + proxy ────────────
+        location / {
+            if ($ip_allowed = 0) {
+                return 403 '{"error":"forbidden","detail":"IP not in allowlist"}';
+            }
+            if ($http_authorization != "Bearer ${EMBD_API_KEY}") {
+                return 401 '{"error":"unauthorized","detail":"Invalid or missing Bearer token"}';
+            }
+            limit_req zone=embd_api burst=30 nodelay;
+
+            proxy_pass         http://embd_backend;
+            # $http_host keeps :port when client uses non-443 HTTPS (ChatGPT / OpenAPI alignment).
+            proxy_set_header   Host              $http_host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header   X-Forwarded-Host  $http_host;
+            proxy_read_timeout 120s;
+        }
+    }
+}

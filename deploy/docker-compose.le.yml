@@ -1,0 +1,13 @@
+# Optional overlay: mount host Let’s Encrypt tree so symlinks under live/ resolve.
+# Usage:
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.le.yml up -d
+#
+# Set in .env (example hostnames):
+#   EMBD_TLS_FULLCHAIN=/etc/letsencrypt/live/embd.example.com/fullchain.pem
+#   EMBD_TLS_PRIVKEY=/etc/letsencrypt/live/embd.example.com/privkey.pem
+#   ALLOW_SELF_SIGNED=0
+
+services:
+  nginx:
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt:ro

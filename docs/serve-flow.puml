@@ -1,0 +1,46 @@
+@startuml serve-flow
+!theme plain
+skinparam backgroundColor white
+skinparam defaultFontName "Helvetica"
+skinparam shadowing false
+
+title embd serve — Retrieval API + File Watcher
+
+actor "ChatGPT / Client" as client
+participant "FastAPI\n(embd serve)" as api
+participant "Encoder\n(warmed at startup)" as encoder
+database "ChromaDB" as chroma
+participant "File Watcher\n(watchdog)" as watcher
+collections "documents/" as docs
+
+== Startup ==
+api -> encoder : load model (warm)
+api -> chroma : open collection
+api -> watcher : start observer(documents/)
+
+== Query ==
+client -> api : POST /query\n{Bearer token}
+activate api
+api -> api : verify Bearer
+api -> encoder : encode_query
+encoder --> api : vector
+api -> chroma : query(vector, top_k)
+chroma --> api : chunks
+api --> client : QueryResponse\n(text, metadata, score)
+deactivate api
+
+== Auto-Ingest (background) ==
+docs -> watcher : file created / modified
+activate watcher
+watcher -> encoder : encode chunks
+encoder --> watcher : embeddings
+watcher -> chroma : upsert_chunks
+deactivate watcher
+note right : Next query sees\nnew chunks immediately
+
+docs -> watcher : file deleted
+activate watcher
+watcher -> chroma : delete_file
+deactivate watcher
+
+@enduml

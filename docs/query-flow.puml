@@ -1,0 +1,44 @@
+@startuml query-flow
+!theme plain
+skinparam backgroundColor white
+skinparam defaultFontName "Helvetica"
+skinparam shadowing false
+
+title embd — Query Flow (CLI, Shell, or API)
+
+actor User
+participant "CLI / Shell / API" as entry
+participant "Encoder\n(sentence-transformers)" as encoder
+database "ChromaDB\n(HNSW cosine)" as chroma
+participant "LLM\n(MLX / Ollama / Claude)" as llm
+participant "SearXNG" as searx
+
+User -> entry : question
+activate entry
+
+entry -> encoder : encode_query(question)
+activate encoder
+encoder --> entry : query vector
+deactivate encoder
+
+entry -> chroma : query(vector, top_k)
+activate chroma
+chroma --> entry : top-k chunks + metadata
+deactivate chroma
+
+opt /search flow
+  entry -> searx : HTTP search(question)
+  activate searx
+  searx --> entry : web snippets
+  deactivate searx
+end
+
+entry -> llm : system prompt + chunks\n+ question [+ web snippets]
+activate llm
+llm --> entry : grounded answer
+deactivate llm
+
+entry --> User : answer + sources\n+ token/timing stats
+
+deactivate entry
+@enduml

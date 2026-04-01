@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "embd"
+version = "0.2.0"
+description = "Fully local document Q&A (RAG) system optimized for Apple Silicon"
+requires-python = ">=3.11"
+dependencies = [
+    "pymupdf>=1.24.0",
+    "sentence-transformers>=3.3.0",
+    "chromadb>=0.5.23",
+    "psutil>=6.0",
+    "click>=8.1.8",
+    "textual>=0.68.0",
+    "anthropic>=0.37.1",
+    "httpx>=0.25.0",
+    "beautifulsoup4>=4.12.0",
+    "ebooklib>=0.18",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "python-dotenv>=1.0.0",
+    "watchdog>=4.0.0",
+]
+
+[project.optional-dependencies]
+mlx      = ["mlx-lm>=0.21.0"]
+docx     = ["python-docx>=1.1.0"]
+xlsx     = ["openpyxl>=3.1.0"]
+# Surya is not compatible with transformers 5.x yet (e.g. SuryaDecoderConfig / pad_token_id).
+ocr      = [
+    "surya-ocr>=0.17.1",
+    "transformers>=4.56.1,<5",
+    "pytesseract>=0.3.10",
+    "Pillow>=10.0.0",
+]
+ocr-cpu  = ["pytesseract>=0.3.10", "Pillow>=10.0.0"]
+all      = ["embd[mlx,docx,xlsx,ocr]"]
+
+[project.scripts]
+embd = "embd.cli:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/embd"]

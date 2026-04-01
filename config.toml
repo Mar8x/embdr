@@ -1,0 +1,105 @@
+[paths]
+documents_dir = "./documents"
+db_dir        = "./chroma_db"
+
+[ingestion]
+# chunk_size: characters per chunk. BGE-M3 supports 8192 tokens, so larger chunks are fine.
+# 2000 chars ≈ 400-500 words — gives self-contained passages with better retrieval.
+chunk_size    = 2000
+# chunk_overlap: characters shared between adjacent chunks. Preserves context at boundaries.
+chunk_overlap = 200
+# enabled_types: which document types to ingest. Disable any you don't need.
+# Available: pdf, epub, txt, md, docx, xlsx
+# docx requires: pip install 'embd[docx]'  (python-docx)
+# xlsx requires: pip install 'embd[xlsx]'  (openpyxl)
+#
+# Image OCR: embedded images in PDF and DOCX are automatically OCR'd.
+# Local Mac (quality): pip install 'embd[ocr]' — Surya on MPS/CUDA + Tesseract fallback.
+# Surya needs transformers 4.56–4.x (pins in pyproject); transformers 5.x breaks Surya today.
+# Server / Docker: pip install 'embd[ocr-cpu]' + apt-get install tesseract-ocr (CPU only).
+# On macOS you can add Tesseract for the CPU fallback: brew install tesseract
+#
+# ocr_embedded_images: when to OCR images inside PDF/DOCX (huge speed difference).
+#   "when_no_text" — only when the page/body has no extractable text (scanned PDFs, images of slides).
+#   "always" — OCR every embedded image even when text exists (very slow on PDFs with logos/icons).
+#   "never" — no image OCR.
+# ocr_backend: "auto" (Surya on MPS/CUDA if available, else Tesseract),
+#              "surya" (high-quality document OCR; needs GPU or falls back to Tesseract),
+#              "tesseract" (CPU only; use ocr_tesseract_lang for script, e.g. "eng+deu").
+# ocr_tesseract_lang: Tesseract only (Surya ignores this — multilingual model).
+# ocr_max_images_per_page: 0 = all images; N>0 = OCR only the N largest images per page (cuts noise/speed).
+#
+# Recursive scanning: documents_dir is scanned recursively — subdirectories and cloned
+# git repos are supported. Source keys in the index use relative POSIX paths
+# (e.g. "papers/report.pdf", "my-repo/README.md").
+# ignore_patterns: fnmatch globs tested against each path component. Directories like
+# .git, node_modules, __pycache__ and binary extensions are skipped by default.
+enabled_types = ["pdf", "epub", "txt", "md", "docx", "xlsx"]
+ocr_embedded_images = "when_no_text"
+ocr_backend = "auto"
+ocr_tesseract_lang = "eng"
+ocr_max_images_per_page = 12
+ignore_patterns = [
+    ".git", "__pycache__", "node_modules", ".venv", "venv",
+    ".tox", ".mypy_cache", ".pytest_cache", "dist", "build", ".eggs",
+    "*.pyc", "*.pyo", "*.o", "*.so", "*.dylib", "*.class", "*.jar",
+]
+
+[embedding]
+# BGE-M3: 1024-dim, multilingual, 8192-token context, normalized by default.
+# Alternatives: BAAI/bge-base-en-v1.5 (768-dim, English-only, lighter)
+model_name = "BAAI/bge-m3"
+# device: "auto" picks the best available accelerator:
+#   Apple Silicon → mps, NVIDIA GPU → cuda, otherwise → cpu.
+# Override with "mps", "cuda", or "cpu" if auto-detection is wrong.
+device     = "auto"
+
+[retrieval]
+# top_k: how many chunks to retrieve per query (5 × 800 chars ≈ 4 KB of context).
+top_k           = 5
+collection_name = "documents"
+
+[llm]
+# backend: "mlx" (Apple Silicon only — requires pip install 'embd[mlx]'),
+#          "ollama" (any platform), or "claude" (API, any platform)
+backend     = "mlx" #"claude" #"mlx"
+
+# --- MLX settings (used when backend = "mlx") ---
+# Model is downloaded once from HuggingFace to ~/.cache/huggingface/ on first run.
+# 48 GB unified memory recommendations:
+#   mlx-community/Mixtral-8x7B-Instruct-v0.1-4bit      ~26 GB  strong generalist
+#   mlx-community/Meta-Llama-3.1-8B-Instruct-4bit      ~5 GB   excellent quality/speed
+#   mlx-community/Mistral-7B-Instruct-v0.3-4bit        ~4 GB   fast baseline
+mlx_model   = "mlx-community/Mixtral-8x7B-Instruct-v0.1-4bit"
+temperature = 0.1    # low temperature reduces hallucination for factual Q&A
+max_tokens  = 512
+
+# System prompt: "grounded" = answer only from retrieved passages (default).
+# "research" = use docs + web snippets as evidence, allow labeled synthesis (good with Claude + /search).
+# If system_prompt is set (multi-line string), it replaces the preset entirely.
+system_prompt_preset = "research" #"grounded"
+# system_prompt = """
+# """
+
+# --- Ollama settings (used when backend = "ollama") ---
+# Requires: brew install ollama && ollama serve && ollama pull llama3.2
+ollama_model = "llama3.2"
+ollama_host  = "http://localhost:11434"
+
+# --- Claude settings (used when backend = "claude") ---
+# Set ANTHROPIC_API_KEY in .env (recommended) or your shell.
+claude_model = "claude-sonnet-4-6"
+# claude_api_key = "..."  # prefer .env — see .env.example
+
+
+[search]
+# SearXNG instance URL for web search. Run your own or use a public instance.
+searxng_url  = "http://localhost:8888/"
+max_results  = 3
+
+# HTTP retrieval API: `embd serve` — OpenAI-style POST /query for ChatGPT Actions.
+# Prefer EMBD_API_KEY in the environment over storing a secret here.
+[server]
+host = "0.0.0.0"
+port = 8000
+# api_key = "paste output of: openssl rand -hex 32"

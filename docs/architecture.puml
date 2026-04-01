@@ -1,0 +1,87 @@
+@startuml architecture
+!theme plain
+skinparam backgroundColor white
+skinparam componentStyle rectangle
+skinparam defaultFontName "Helvetica"
+skinparam shadowing false
+
+title embd — Architecture Overview
+
+actor "User" as user
+
+package "embd CLI / Shell" as cli {
+  [embd ingest] as ingest
+  [embd query] as query
+  [embd shell] as shell
+  [embd serve] as serve
+}
+
+package "Ingestion Pipeline" as ingestion {
+  [Scanner\n(SHA-256 change detect)] as scanner
+  [Extractor Registry\n(PDF · EPUB · TXT · MD\nDOCX · XLSX)] as extractor
+  [Image OCR\n(Surya MPS/CUDA\nor Tesseract CPU)] as ocr
+  [Chunker\n(sentence-aware)] as chunker
+  [Web Extractor\n(httpx + BS4)] as webext
+}
+
+extractor --> ocr : "images from\nPDF / DOCX"
+
+package "Embedding" as embedding {
+  [Encoder\n(sentence-transformers\nBGE-M3 · auto device)] as encoder
+}
+
+database "ChromaDB\n(local disk\ncosine / HNSW)" as chroma
+
+package "LLM Generation" as llm {
+  [MLX\n(Apple Silicon)] as mlx
+  [Ollama\n(local server)] as ollama
+  [Claude\n(Anthropic API)] as claude
+}
+
+cloud "SearXNG\n(web search)" as searxng
+
+cloud "ChatGPT / API clients" as chatgpt
+
+rectangle "File Watcher\n(watchdog)" as watcher
+
+file "documents/\n(PDF, EPUB, TXT, MD,\nDOCX, XLSX)" as docs
+file ".env\n(secrets)" as dotenv
+file "config.toml" as config
+
+user --> cli
+
+ingest --> scanner
+scanner --> docs
+scanner --> extractor
+extractor --> chunker
+chunker --> encoder
+encoder --> chroma
+
+webext --> encoder
+
+query --> encoder
+query --> chroma
+query --> llm
+
+shell --> encoder
+shell --> chroma
+shell --> llm
+shell --> searxng
+shell --> webext
+
+serve --> encoder
+serve --> chroma
+serve ..> watcher : starts
+watcher --> docs : monitors
+watcher --> encoder : auto-ingest
+watcher --> chroma : upsert/delete
+
+chatgpt --> serve : "POST /query\n(Bearer auth)"
+
+config --> cli
+dotenv --> cli
+
+mlx -[hidden]-> ollama
+ollama -[hidden]-> claude
+
+@enduml

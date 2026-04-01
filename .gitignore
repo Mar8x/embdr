@@ -1,0 +1,17 @@
+.env
+documents/
+chroma_db/
+.DS_Store
+*.log
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+build/
+deploy/certs/*.pem
+deploy/certs/*.key
+deploy/aws-credentials.env
+deploy/openai-ips.conf
+.claude/
+.cursor/
