@@ -45,6 +45,26 @@ ignore_patterns = [
     "*.pyc", "*.pyo", "*.o", "*.so", "*.dylib", "*.class", "*.jar",
 ]
 
+# Contextual ingestion — generates a situating context string per chunk
+# before embedding. One LLM call per chunk at ingest time (one-time cost).
+#
+# contextual_ingestion: set true to always contextualize on ingest.
+#   Leave false and use --contextualize flag for explicit opt-in.
+#
+# contextual_backend: LLM for context generation.
+#   "claude" — fast, cheap with prompt caching. Uses claude-haiku-4-5.
+#   "ollama" — local, free, no API cost, slower. Uses ollama_model from [llm].
+#
+# contextual_max_doc_tokens: documents above this use a sliding window
+#   instead of full document per chunk. Prevents context window overflow.
+#
+# contextual_window_chunks: when sliding window is active, number of
+#   surrounding chunks to include as context (prev N + next N).
+contextual_ingestion        = false
+contextual_backend          = "claude"
+contextual_max_doc_tokens   = 50000
+contextual_window_chunks    = 3
+
 [embedding]
 # BGE-M3: 1024-dim, multilingual, 8192-token context, normalized by default.
 # Alternatives: BAAI/bge-base-en-v1.5 (768-dim, English-only, lighter)
@@ -58,6 +78,10 @@ device     = "auto"
 # top_k: how many chunks to retrieve per query (5 × 2000 chars ≈ 10 KB of context).
 top_k           = 5
 collection_name = "documents"
+# Hybrid search weights for Reciprocal Rank Fusion (semantic + BM25).
+# Must sum to 1.0. Set bm25_weight = 0 for pure semantic search.
+semantic_weight = 0.8
+bm25_weight     = 0.2
 
 [llm]
 # backend: "mlx" (Apple Silicon only — requires pip install 'embd[mlx]'),

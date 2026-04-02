@@ -307,12 +307,18 @@ def create_app(cfg: Config) -> FastAPI:
     async def lifespan(app: FastAPI):
         from .ingestion.watcher import start_watcher
 
+        from .ingestion.bm25_index import BM25Index, BM25_FILENAME
+
         logger.info("Loading embedding model (warming up) …")
         encoder = Encoder(cfg.embedding.model_name, cfg.embedding.device)
         _ = encoder._model  # force model load now so first request is fast
         store = VectorStore(cfg.paths.db_dir, cfg.retrieval.collection_name)
+        bm25 = BM25Index.load(cfg.paths.db_dir / BM25_FILENAME)
         app.state.encoder = encoder
         app.state.store = store
+        app.state.bm25 = bm25
+        if bm25:
+            logger.info("BM25 index loaded — hybrid search enabled")
         logger.info(
             "Retrieval API ready. Collection=%s chunks=%d",
             cfg.retrieval.collection_name,
@@ -437,7 +443,21 @@ Every factual claim drawn from a passage **must** carry an inline citation using
             top_k = item.top_k if item.top_k is not None else default_k
             where = _filter_to_chroma_where(item.filter)
             vec = encoder.encode_query(q)
-            hits = store.query(vec, top_k=top_k, where=where)
+
+            bm25 = getattr(app.state, "bm25", None)
+            if bm25 is not None and cfg.retrieval.bm25_weight > 0 and where is None:
+                from .qa.hybrid_retriever import rrf_merge
+                fetch_k = top_k * 2
+                semantic_hits = store.query(vec, top_k=fetch_k, where=where)
+                bm25_hits = bm25.query(q, top_k=fetch_k)
+                hits = rrf_merge(
+                    semantic_hits, bm25_hits, store,
+                    semantic_weight=cfg.retrieval.semantic_weight,
+                    bm25_weight=cfg.retrieval.bm25_weight,
+                    top_k=top_k,
+                )
+            else:
+                hits = store.query(vec, top_k=top_k, where=where)
 
             chunks: list[DocumentChunkWithScore] = []
             for h in hits:

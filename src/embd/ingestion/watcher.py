@@ -29,6 +29,7 @@ from .scanner import _is_ignored
 logger = logging.getLogger(__name__)
 
 _DEBOUNCE_SECONDS = 2.0
+_BM25_REBUILD_DEBOUNCE = 30.0
 
 
 class _IngestHandler(FileSystemEventHandler):
@@ -49,6 +50,7 @@ class _IngestHandler(FileSystemEventHandler):
         self._ignore_patterns = cfg.ingestion.ignore_patterns
         self._timers: dict[str, threading.Timer] = {}
         self._lock = threading.Lock()
+        self._bm25_timer: threading.Timer | None = None
 
     def _rel_key(self, path: Path) -> str | None:
         """Return the POSIX relative path from documents_dir, or None if ignored."""
@@ -96,10 +98,29 @@ class _IngestHandler(FileSystemEventHandler):
                     result.n_chunks,
                     result.extract_s + result.embed_s + result.upsert_s,
                 )
+                self._schedule_bm25_rebuild()
             else:
                 logger.warning("[watcher] %s: no extractable text", source_key)
         except Exception:
             logger.exception("[watcher] Failed to ingest %s", source_key)
+
+    def _schedule_bm25_rebuild(self) -> None:
+        """Debounced BM25 index rebuild (30s delay to batch rapid changes)."""
+        with self._lock:
+            if self._bm25_timer is not None:
+                self._bm25_timer.cancel()
+            t = threading.Timer(_BM25_REBUILD_DEBOUNCE, self._do_bm25_rebuild)
+            t.daemon = True
+            self._bm25_timer = t
+            t.start()
+
+    def _do_bm25_rebuild(self) -> None:
+        try:
+            from .bm25_index import build_and_save_bm25
+            build_and_save_bm25(self._store, self._cfg.paths.db_dir)
+            logger.info("[watcher] BM25 index rebuilt")
+        except Exception:
+            logger.exception("[watcher] BM25 rebuild failed")
 
     def on_created(self, event: FileSystemEvent) -> None:
         if event.is_directory:
@@ -148,6 +169,7 @@ class _IngestHandler(FileSystemEventHandler):
             logger.info("[watcher] File deleted: %s — removing chunks", key)
             try:
                 self._store.delete_file(key)
+                self._schedule_bm25_rebuild()
             except Exception:
                 logger.exception("[watcher] Failed to delete chunks for %s", key)
 

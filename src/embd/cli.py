@@ -82,90 +82,152 @@ def cli(ctx: click.Context, config_path: str, verbose: bool) -> None:
 # ---------------------------------------------------------------------------
 
 @cli.command()
+@click.option("--refresh", is_flag=True,
+              help="Re-check all files by hash; skip unchanged, re-ingest changed.")
+@click.option("--reset", is_flag=True,
+              help="Drop all embeddings and re-ingest from scratch (implies --refresh).")
+@click.option("--contextualize", is_flag=True,
+              help="Run contextual generation on un-contextualized chunks after ingest.")
+@click.option("--contextualize-estimate-only", is_flag=True,
+              help="Print cost/time estimate for contextual generation, then exit.")
 @click.pass_context
-def ingest(ctx: click.Context) -> None:
-    """Scan the documents folder and ingest new or changed PDFs.
+def ingest(
+    ctx: click.Context,
+    refresh: bool,
+    reset: bool,
+    contextualize: bool,
+    contextualize_estimate_only: bool,
+) -> None:
+    """Scan the documents folder and ingest new or changed files.
 
     Files whose SHA-256 hash has not changed since the last ingest are
     skipped. Changed files are deleted from the store and re-indexed.
     Files that have been removed from disk are also cleaned up.
+
+    A BM25 keyword index is built after every run that modifies the store.
     """
     cfg: Config = ctx.obj["config"]
+    from .ingestion.ingest import _source_key
+    from .ingestion.bm25_index import build_and_save_bm25
+    from .store.meta_db import MetaDB
 
-    # Ensure documents dir exists (allows running ingest before adding any PDFs)
+    # --reset implies --refresh
+    if reset:
+        refresh = True
+
+    # Ensure documents dir exists
     cfg.paths.documents_dir.mkdir(parents=True, exist_ok=True)
 
     store   = VectorStore(cfg.paths.db_dir, cfg.retrieval.collection_name)
+    meta_db = MetaDB(cfg.paths.db_dir / "embd_meta.db")
+    docs_dir = cfg.paths.documents_dir
+
+    # --contextualize-estimate-only: print estimate and exit
+    if contextualize_estimate_only:
+        from .ingestion.contextual import estimate_contextualization, print_estimate
+        estimate = estimate_contextualization(meta_db, cfg)
+        print_estimate(estimate, cfg)
+        meta_db.close()
+        return
+
+    # --reset: drop everything, prompt for confirmation
+    if reset:
+        if sys.stdin.isatty():
+            click.confirm(
+                "This will DELETE all embeddings and re-ingest from scratch.\n"
+                f"  DB: {cfg.paths.db_dir}\n"
+                "Continue?",
+                abort=True,
+            )
+        store._client.delete_collection(cfg.retrieval.collection_name)
+        store._collection = store._client.get_or_create_collection(
+            name=cfg.retrieval.collection_name,
+            metadata={"hnsw:space": "cosine"},
+        )
+        meta_db.reset()
+        click.echo(f"Cleared collection '{cfg.retrieval.collection_name}'.")
+
     encoder = Encoder(cfg.embedding.model_name, cfg.embedding.device)
 
     with Timer("total") as total_timer:
-        known_files = store.get_known_files()
+        # For --refresh/--reset, ignore stored state to force re-check
+        if refresh:
+            known_files: dict[str, str] = {}
+        else:
+            known_files = store.get_known_files()
+
         exts = get_supported_extensions(cfg.ingestion.enabled_types)
         scan = scan_documents(
             cfg.paths.documents_dir, known_files, exts,
             ignore_patterns=cfg.ingestion.ignore_patterns,
         )
 
-        # Build a reverse map: abs path → relative source key
-        from .ingestion.ingest import _source_key
-        docs_dir = cfg.paths.documents_dir
-
         # Delete stale data before re-ingesting changed files
         for path in scan.to_update:
-            store.delete_file(_source_key(path, docs_dir))
+            sk = _source_key(path, docs_dir)
+            store.delete_file(sk)
+            meta_db.reset_contextual(sk)
 
         # Remove files that no longer exist on disk
         for name in scan.to_remove:
             store.delete_file(name)
+            meta_db.remove_file(name)
 
         to_process = scan.to_add + scan.to_update
-        if not to_process:
+        modified = bool(to_process or scan.to_remove)
+
+        if not to_process and not scan.to_remove:
             click.echo("Nothing to ingest — all files are up to date.")
-            return
+        else:
+            total_chunks = 0
+            embed_elapsed = 0.0
 
-        total_chunks = 0
-        embed_elapsed = 0.0
+            for i, pdf_path in enumerate(to_process, start=1):
+                src_key = _source_key(pdf_path, docs_dir)
+                click.echo(f"[{i}/{len(to_process)}] {src_key} ...")
+                result = _ingest_file_core(
+                    pdf_path, store, encoder, cfg, source_name=src_key,
+                )
+                if result is None:
+                    click.echo("  skipped (no extractable text)")
+                    continue
+                total_chunks += result.n_chunks
+                embed_elapsed += result.embed_s
+                click.echo(f"  → {result.n_chunks} chunks, embed {result.embed_s:.1f}s")
 
-        for i, pdf_path in enumerate(to_process, start=1):
-            src_key = _source_key(pdf_path, docs_dir)
-            click.echo(f"[{i}/{len(to_process)}] {src_key} ...")
-            n_chunks, e_s = _ingest_file(pdf_path, store, encoder, cfg, source_name=src_key)
-            total_chunks += n_chunks
-            embed_elapsed += e_s
-            click.echo(f"  → {n_chunks} chunks, embed {e_s:.1f}s")
+                # Sync to SQLite
+                mtime = pdf_path.stat().st_mtime
+                file_hash = hash_file(pdf_path)
+                meta_db.upsert_file(
+                    source_key=src_key,
+                    file_hash=file_hash,
+                    mtime=mtime,
+                    char_count=result.char_count,
+                    chunk_count=result.n_chunks,
+                )
 
-    print_ingest_report(
-        n_new=len(scan.to_add),
-        n_updated=len(scan.to_update),
-        n_removed=len(scan.to_remove),
-        n_chunks=total_chunks,
-        embed_s=embed_elapsed,
-        total_s=total_timer.elapsed,
-    )
+            print_ingest_report(
+                n_new=len(scan.to_add),
+                n_updated=len(scan.to_update),
+                n_removed=len(scan.to_remove),
+                n_chunks=total_chunks,
+                embed_s=embed_elapsed,
+                total_s=total_timer.elapsed,
+            )
 
+        # Build BM25 index after any modifications
+        if modified:
+            click.echo("Building BM25 index ...")
+            with Timer("bm25") as bm25_timer:
+                build_and_save_bm25(store, cfg.paths.db_dir)
+            click.echo(f"BM25 index built in {bm25_timer.elapsed:.1f}s")
 
-def _ingest_file(
-    pdf_path: Path,
-    store: VectorStore,
-    encoder: Encoder,
-    cfg: Config,
-    *,
-    delete_existing: bool = False,
-    source_name: str | None = None,
-) -> tuple[int, float]:
-    """Thin CLI wrapper around the shared ingest_file; prints progress."""
-    result = _ingest_file_core(
-        pdf_path, store, encoder, cfg,
-        delete_existing=delete_existing, source_name=source_name,
-    )
-    if result is None:
-        click.echo(f"  skipped (no extractable text)")
-        return 0, 0.0
-    click.echo(
-        f"  {result.n_chunks} chunks "
-        f"(extract {result.extract_s:.1f}s, embed {result.embed_s:.1f}s)"
-    )
-    return result.n_chunks, result.embed_s
+    # --contextualize: run after ingest
+    if contextualize or cfg.ingestion.contextual_ingestion:
+        from .ingestion.contextual import contextualize_files
+        contextualize_files(store, encoder, meta_db, cfg)
+
+    meta_db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -257,14 +319,30 @@ def query(ctx: click.Context, question: str) -> None:
     store   = VectorStore(cfg.paths.db_dir, cfg.retrieval.collection_name)
     encoder = Encoder(cfg.embedding.model_name, cfg.embedding.device)
 
+    # Load BM25 index for hybrid search (graceful: None if absent)
+    from .ingestion.bm25_index import BM25Index, BM25_FILENAME
+    bm25 = BM25Index.load(cfg.paths.db_dir / BM25_FILENAME)
+
     # Step 1: Embed the query (timed separately from retrieval)
     with Timer("embed") as embed_timer:
         query_vec = encoder.encode_query(question)
     embed_ms = embed_timer.elapsed * 1000
 
-    # Step 2: Retrieve top-k chunks via HNSW search
+    # Step 2: Retrieve top-k chunks (hybrid if BM25 available)
     with Timer("retrieve") as retrieve_timer:
-        hits = store.query(query_vec, top_k=cfg.retrieval.top_k)
+        if bm25 is not None and cfg.retrieval.bm25_weight > 0:
+            from .qa.hybrid_retriever import rrf_merge
+            fetch_k = cfg.retrieval.top_k * 2
+            semantic_hits = store.query(query_vec, top_k=fetch_k)
+            bm25_hits = bm25.query(question, top_k=fetch_k)
+            hits = rrf_merge(
+                semantic_hits, bm25_hits, store,
+                semantic_weight=cfg.retrieval.semantic_weight,
+                bm25_weight=cfg.retrieval.bm25_weight,
+                top_k=cfg.retrieval.top_k,
+            )
+        else:
+            hits = store.query(query_vec, top_k=cfg.retrieval.top_k)
     retrieve_ms = retrieve_timer.elapsed * 1000
 
     if not hits:
@@ -480,8 +558,20 @@ def rebuild(ctx: click.Context, yes: bool) -> None:
             abort=True,
         )
 
+    from .store.meta_db import MetaDB
+    from .ingestion.bm25_index import BM25_FILENAME
+
     store = VectorStore(cfg.paths.db_dir, cfg.retrieval.collection_name)
     store._client.delete_collection(cfg.retrieval.collection_name)
+
+    meta_db = MetaDB(cfg.paths.db_dir / "embd_meta.db")
+    meta_db.reset()
+    meta_db.close()
+
+    bm25_path = cfg.paths.db_dir / BM25_FILENAME
+    if bm25_path.exists():
+        bm25_path.unlink()
+
     click.echo(f"Cleared collection '{cfg.retrieval.collection_name}'.")
 
     # Re-use the ingest command (inherits ctx.obj["config"])

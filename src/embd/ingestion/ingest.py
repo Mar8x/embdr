@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 class IngestResult:
     filename: str
     n_chunks: int
+    char_count: int
     extract_s: float
     embed_s: float
     upsert_s: float
@@ -117,6 +118,7 @@ def ingest_file(
     return IngestResult(
         filename=source_name,
         n_chunks=len(chunks),
+        char_count=sum(len(t) for t in texts),
         extract_s=t_extract.elapsed,
         embed_s=t_embed.elapsed,
         upsert_s=t_upsert.elapsed,

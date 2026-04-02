@@ -48,6 +48,11 @@ class IngestionConfig:
         ".git", "__pycache__", "node_modules", ".venv", "venv",
         "*.pyc", "*.pyo", "*.o", "*.so", "*.dylib",
     ])
+    # Contextual ingestion — prepend LLM-generated context to each chunk.
+    contextual_ingestion: bool = False
+    contextual_backend: str = "claude"  # "claude" or "ollama"
+    contextual_max_doc_tokens: int = 50000
+    contextual_window_chunks: int = 3
 
 
 @dataclass
@@ -60,6 +65,10 @@ class EmbeddingConfig:
 class RetrievalConfig:
     top_k: int = 5
     collection_name: str = "documents"
+    # Hybrid search weights for RRF merge (semantic + BM25).
+    # Set bm25_weight = 0 to disable BM25 entirely.
+    semantic_weight: float = 0.8
+    bm25_weight: float = 0.2
 
 
 @dataclass

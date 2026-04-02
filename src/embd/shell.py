@@ -126,6 +126,8 @@ class EmbdShell(App[None]):
         self._cfg = cfg
         self._store = VectorStore(cfg.paths.db_dir, cfg.retrieval.collection_name)
         self._encoder = Encoder(cfg.embedding.model_name, cfg.embedding.device)
+        from .ingestion.bm25_index import BM25Index, BM25_FILENAME
+        self._bm25 = BM25Index.load(cfg.paths.db_dir / BM25_FILENAME)
         self._generator = self._make_generator(cfg)
         self._busy = False
         self._history: list[ChatTurn] = []
@@ -430,7 +432,7 @@ class EmbdShell(App[None]):
                 query_vec = self._encoder.encode_query(prompt_question)
             self.call_from_thread(self._set_status, "Working: retrieving chunks...")
             with Timer("retrieve") as retrieve_timer:
-                hits = self._store.query(query_vec, top_k=self._cfg.retrieval.top_k)
+                hits = self._hybrid_query(query_vec, prompt_question, self._cfg.retrieval.top_k)
 
             if not hits:
                 self.call_from_thread(
@@ -520,7 +522,7 @@ class EmbdShell(App[None]):
 
             self.call_from_thread(self._set_status, "Working: retrieving local chunks...")
             with Timer("retrieve") as retrieve_timer:
-                hits = self._store.query(query_vec, top_k=self._cfg.retrieval.top_k)
+                hits = self._hybrid_query(query_vec, search_query, self._cfg.retrieval.top_k)
 
             local_chunks = [
                 RetrievedChunk(
@@ -816,6 +818,22 @@ class EmbdShell(App[None]):
         )
         logger.addHandler(handler)
         return logger
+
+    def _hybrid_query(self, query_vec: list[float], query_text: str, top_k: int) -> list[dict]:
+        """Query with RRF hybrid merge if BM25 index is available."""
+        cfg = self._cfg
+        if self._bm25 is not None and cfg.retrieval.bm25_weight > 0:
+            from .qa.hybrid_retriever import rrf_merge
+            fetch_k = top_k * 2
+            semantic_hits = self._store.query(query_vec, top_k=fetch_k)
+            bm25_hits = self._bm25.query(query_text, top_k=fetch_k)
+            return rrf_merge(
+                semantic_hits, bm25_hits, self._store,
+                semantic_weight=cfg.retrieval.semantic_weight,
+                bm25_weight=cfg.retrieval.bm25_weight,
+                top_k=top_k,
+            )
+        return self._store.query(query_vec, top_k=top_k)
 
     @staticmethod
     def _make_generator(cfg: Config):
