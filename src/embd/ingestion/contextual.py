@@ -569,7 +569,15 @@ def _ollama_context_call(
 
     text = response["message"]["content"].strip()
     eval_count = response.get("eval_count", 0) or 0
-    tok_per_sec = eval_count / elapsed if elapsed > 0 else 0.0
+    # Use Ollama's own eval_duration (generation only, nanoseconds) so prefill
+    # time from large input contexts doesn't deflate the tok/s measurement.
+    eval_duration_ns = response.get("eval_duration", 0) or 0
+    if eval_duration_ns > 0:
+        tok_per_sec = eval_count / (eval_duration_ns / 1e9)
+    elif elapsed > 0:
+        tok_per_sec = eval_count / elapsed  # fallback
+    else:
+        tok_per_sec = 0.0
 
     return text, eval_count, tok_per_sec
 
