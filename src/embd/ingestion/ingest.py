@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 class IngestResult:
     filename: str
     n_chunks: int
+    char_count: int
     extract_s: float
     embed_s: float
     upsert_s: float
@@ -58,6 +59,10 @@ def ingest_file(
 
     Returns None when the file has no extractable text.
     When *delete_existing* is True, removes old chunks for this source first.
+
+    Contextual generation is NOT done here — it runs as a separate pass
+    after all files are ingested, so only one model uses the GPU at a time.
+    See ``contextualize_files()`` in ``contextual.py``.
     """
     if source_name is None:
         source_name = _source_key(path, cfg.paths.documents_dir)
@@ -117,6 +122,7 @@ def ingest_file(
     return IngestResult(
         filename=source_name,
         n_chunks=len(chunks),
+        char_count=sum(len(t) for t in texts),
         extract_s=t_extract.elapsed,
         embed_s=t_embed.elapsed,
         upsert_s=t_upsert.elapsed,

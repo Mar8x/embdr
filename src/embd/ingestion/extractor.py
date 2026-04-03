@@ -101,15 +101,16 @@ def extract_pages(pdf_path: Path, ingestion: IngestionConfig) -> list[PageText]:
             "Extracting text from '%s' (%d pages, image OCR %s) …",
             pdf_path.name, total_pages, ocr_note,
         )
-        if do_ocr:
-            if mode == "always" and not _warned_always_ocr:
-                _warned_always_ocr = True
-                logger.warning(
-                    "ocr_embedded_images=always runs OCR on every embedded image on every page — "
-                    "often 10–100× slower than when_no_text; use when_no_text unless you need "
-                    "figures on pages that already have a text layer."
-                )
+        if do_ocr and mode == "always" and not _warned_always_ocr:
+            _warned_always_ocr = True
+            logger.warning(
+                "ocr_embedded_images=always runs OCR on every embedded image on every page — "
+                "often 10–100× slower than when_no_text; use when_no_text unless you need "
+                "figures on pages that already have a text layer."
+            )
+            # Preload eagerly for "always" mode since every page will need it
             preload_surya_for_ingestion(ingestion.ocr_backend)
+        ocr_preloaded = mode == "always"
         t0 = time.perf_counter()
 
         for i, page in enumerate(doc, start=1):
@@ -126,6 +127,10 @@ def extract_pages(pdf_path: Path, ingestion: IngestionConfig) -> list[PageText]:
             if do_ocr:
                 run_img_ocr = mode == "always" or (mode == "when_no_text" and not text)
                 if run_img_ocr:
+                    # Lazy-init: only load Surya when a page actually needs OCR
+                    if not ocr_preloaded:
+                        preload_surya_for_ingestion(ingestion.ocr_backend)
+                        ocr_preloaded = True
                     img_bytes = _extract_page_images(page, max_images=max_img)
                     if img_bytes:
                         ocr_text = ocr_images(

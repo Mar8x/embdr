@@ -1,6 +1,8 @@
 .env
 documents/
 chroma_db/
+bm25_index.pkl
+embd_meta.db
 .DS_Store
 *.log
 __pycache__/

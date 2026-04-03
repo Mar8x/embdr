@@ -24,6 +24,18 @@ _DEFAULT_TYPES = ["pdf", "epub", "txt", "md", "docx", "xlsx"]
 
 
 @dataclass
+class ContextualConfig:
+    """Contextual generation — LLM-generated context prepended to chunks at ingest time."""
+    backend: str = "claude"         # "claude", "ollama", or "mlx"
+    # Models used for context generation — independent from [llm] inference models.
+    ollama_model: str = "qwen3:4b"
+    claude_model: str = "claude-haiku-4-5-20251001"
+    mlx_model: str = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+    max_doc_tokens: int = 50000
+    window_chunks: int = 3
+
+
+@dataclass
 class IngestionConfig:
     chunk_size: int = 2000
     chunk_overlap: int = 200
@@ -48,6 +60,8 @@ class IngestionConfig:
         ".git", "__pycache__", "node_modules", ".venv", "venv",
         "*.pyc", "*.pyo", "*.o", "*.so", "*.dylib",
     ])
+    # Contextual generation settings (nested [ingestion.contextual] in TOML).
+    contextual: ContextualConfig = field(default_factory=ContextualConfig)
 
 
 @dataclass
@@ -60,6 +74,10 @@ class EmbeddingConfig:
 class RetrievalConfig:
     top_k: int = 5
     collection_name: str = "documents"
+    # Hybrid search weights for RRF merge (semantic + BM25).
+    # Set bm25_weight = 0 to disable BM25 entirely.
+    semantic_weight: float = 0.8
+    bm25_weight: float = 0.2
 
 
 @dataclass
@@ -138,12 +156,22 @@ def load_config(config_path: Path = Path("config.toml")) -> Config:
     if obu:
         server_raw["openapi_base_url"] = obu
 
+    # Parse ingestion with nested contextual sub-table
+    ingestion_raw = dict(raw.get("ingestion", {}))
+    contextual_raw = ingestion_raw.pop("contextual", {})
+    # Contextual backend uses [llm].ollama_host for Ollama (shared infra).
+    # Model and other settings come from [ingestion.contextual].
+    ingestion_cfg = IngestionConfig(
+        **ingestion_raw,
+        contextual=ContextualConfig(**contextual_raw),
+    )
+
     return Config(
         paths=PathsConfig(
             documents_dir=Path(p.get("documents_dir", "./documents")),
             db_dir=Path(p.get("db_dir", "./chroma_db")),
         ),
-        ingestion=IngestionConfig(**raw.get("ingestion", {})),
+        ingestion=ingestion_cfg,
         embedding=EmbeddingConfig(**raw.get("embedding", {})),
         retrieval=RetrievalConfig(**raw.get("retrieval", {})),
         llm=LLMConfig(**llm_raw),
