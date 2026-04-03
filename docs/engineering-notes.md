@@ -63,3 +63,24 @@ Sub-1B models (Llama-3.2-1B) are not suitable — throughput gain over 1.7B is m
 - Qwen3 Technical Report — https://arxiv.org/pdf/2505.09388
 - Qwen3 Blog (Alibaba) — https://qwenlm.github.io/blog/qwen3/
 - Qwen3 in RAG pipelines — https://medium.com/@marketing_novita.ai/qwen-3-in-rag-pipelines-all-in-one-llm-embedding-and-reranking-solution-619fe1acfe11
+
+---
+
+## Contextual Generation: Full-Doc vs Sliding Window Performance
+
+### Finding: set `max_doc_tokens` low — full-doc mode is an Ollama/MLX trap
+
+With `max_doc_tokens = 50000`, documents below 50,000 tokens use **full-doc mode**: the entire document text is sent as context on every single chunk call. Ollama and MLX do **not** cache the KV state between calls, so each call re-processes the full document from scratch.
+
+Observed on Apple M4 Pro with qwen3:4b (Ollama):
+
+| Mode | Input tokens/call | Observed tok/s |
+|---|---|---|
+| Full-doc (19,000 token doc) | ~19,000 | ~1 tok/s |
+| Sliding window (window=3) | ~3,500 | ~38 tok/s |
+
+At ~500 tok/s prefill speed, a 19,000-token document costs 38 seconds of prefill per chunk — completely dominating the ~2-second generation phase. The measured tok/s (output tokens / total wall time) collapses to ~1–2 tok/s.
+
+**Fix:** set `max_doc_tokens = 4000` (~16,000 chars). This pushes virtually all real-world documents into sliding window mode, capping input per call at `(2×window_chunks+1) × chunk_size` chars (~14,000 chars / ~3,500 tokens). Throughput returns to the expected 30–40 tok/s.
+
+**Claude is unaffected** — prompt caching (`cache_control: ephemeral`) makes repeated full-doc calls cheap: the document is cached after the first chunk and subsequent calls hit the cache at 1/10th input cost. The `max_doc_tokens` threshold matters only for Ollama and MLX.
