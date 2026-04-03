@@ -37,27 +37,35 @@ MLX may be faster for retroactive contextualisation (no embedding model loaded),
 
 ## Contextual Generation: Model Selection
 
-Measured on Apple M4 Pro using `embd ingest --recontext-file` on a representative document.
+Measured on Apple M4 Pro using `embd ingest --recontext-file`.
 
-### Benchmark results
+### Measurement methodology note
 
-| Model | Backend | Throughput |
-|---|---|---|
-| qwen3:1.7b | Ollama | 79 tok/s |
-| Llama-3.2-1B-Instruct-4bit | MLX | 62 tok/s |
-| Qwen2.5-1.5B-Instruct-4bit | MLX | 35 tok/s |
-| qwen3:4b | Ollama | 38 tok/s |
-| Llama-3.2-3B-Instruct-4bit | MLX | 16 tok/s |
+Initial benchmarks used **wall time / output tokens**, which included LLM prefill time. For large input contexts (sliding window or full-doc), prefill dominated and deflated the numbers. As of 2026-04-03, the Ollama backend was fixed to use `eval_duration` from the Ollama response (generation time only), giving accurate generation tok/s regardless of input size. MLX still uses wall time (no separate metric available).
 
-### Finding
+### Benchmark results (corrected, 2026-04-03)
 
-**`qwen3:4b` is the recommended minimum.** Despite being 2× slower than `qwen3:1.7b`, the quality gap matters for this task.
+| Model | Backend | Throughput | Notes |
+|---|---|---|---|
+| qwen3:1.7b | Ollama | 104 tok/s | Fastest; quality risk at 1.7B |
+| qwen3:4b | Ollama | 62 tok/s | Best quality/speed balance |
+| Llama-3.2-1B-Instruct-4bit | MLX | 36 tok/s | MLX native; quality marginal |
+| Qwen2.5-1.5B-Instruct-4bit | MLX | 18 tok/s | MLX native; better than Llama-1B |
+| Llama-3.2-3B-Instruct-4bit | MLX | 9 tok/s | Slow on MPS; use Ollama instead |
 
-Context generation requires strict instruction adherence — the prompt asks for a short, on-topic situating sentence and nothing else. At 1–1.7B parameters, models drift: they ramble, miss the format constraint, or produce generic summaries that don't accurately situate the chunk. **A bad context string is worse than none** — it corrupts the embedding and degrades retrieval for that chunk until explicitly re-contextualized.
+Previous measurements (wall time, inflated by prefill): qwen3:1.7b 79, Llama-1B 62, Qwen2.5-1.5B 35, qwen3:4b 38, Llama-3B 16.
 
-The Qwen3 scaling report confirms the gap is non-linear: Qwen3-4B exceeds Qwen2.5-7B on reasoning and instruction-following, while Qwen3-1.7B tracks closer to Qwen2.5-3B. This translates directly to structured-output reliability at short output lengths.
+### Hardware choice: Apple M4 Pro
 
-Sub-1B models (Llama-3.2-1B) are not suitable — throughput gain over 1.7B is marginal and output quality degrades further.
+Active configuration: **MLX backend, `Qwen2.5-1.5B-Instruct-4bit`** (18 tok/s).
+
+Chosen over faster alternatives for two reasons:
+- **No Ollama dependency** — MLX runs natively in-process, no server to manage. Useful when contextualizing in isolation without Ollama running.
+- **Better instruction following than Llama-1B** — Qwen2.5-1.5B produces more consistent structured output than Llama-3.2-1B despite lower throughput. The quality gap vs Llama-1B justifies the 2× speed cost.
+
+If throughput is the priority and Ollama is available, **qwen3:4b via Ollama at 62 tok/s** is the best overall choice: strong instruction following, 3× faster than Qwen2.5-1.5B MLX.
+
+Quality recommendation unchanged: **avoid sub-1.5B models** — they drift from the format constraint and produce generic summaries that corrupt embeddings.
 
 **Sources:**
 - Qwen3 Technical Report — https://arxiv.org/pdf/2505.09388
