@@ -111,15 +111,24 @@ def ingest(
     """Scan the documents folder and ingest new or changed files.
 
     \b
-    embd ingest                              embed new/changed files
-    embd ingest --contextualize              embed, then contextualize un-done files
+    embd ingest                              embed new/changed files (pass 1)
+    embd ingest --contextualize              pass 1 if needed, then contextualize (pass 2)
     embd ingest --recontext                  re-contextualize ALL files from scratch
     embd ingest --recontext-file report.pdf  re-contextualize one specific file
     embd ingest -y                           skip confirmation prompt
 
-    --contextualize processes every file not yet contextualized (new +
-    previously ingested). --recontext resets all contextual state first,
-    then contextualizes everything. Interrupted runs resume where they left off.
+    Two-pass design — each pass is safe to run on its own:
+
+      Pass 1  extract → chunk → embed → BM25 index.
+              Hybrid search works immediately after this.
+
+      Pass 2  (--contextualize) for each un-done file: re-parse, call LLM to
+              generate a short situating context per chunk, prepend it, re-embed.
+              Already-contextualized files are ALWAYS skipped.
+
+    If nothing has changed on disk, pass 1 is a no-op and --contextualize goes
+    straight to pass 2. You can embed today and contextualize later — or do both
+    in one command. Interrupted runs resume where they left off.
     """
     cfg: Config = ctx.obj["config"]
     from .ingestion.ingest import _source_key
