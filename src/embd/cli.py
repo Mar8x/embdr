@@ -87,24 +87,39 @@ def cli(ctx: click.Context, config_path: str, verbose: bool) -> None:
 @click.option("--reset", is_flag=True,
               help="Drop all embeddings and re-ingest from scratch (implies --refresh).")
 @click.option("--contextualize", is_flag=True,
-              help="Run contextual generation on un-contextualized chunks after ingest.")
+              help="After embedding, contextualize all un-contextualized files "
+                   "(new + previously ingested). Already-done files are skipped.")
+@click.option("--recontext", is_flag=True,
+              help="Re-contextualize ALL files from scratch (resets contextual state first).")
+@click.option("--recontext-file", type=str, default=None, metavar="SOURCE_KEY",
+              help="Re-contextualize a single file by source key (e.g. 'report.pdf').")
 @click.option("--contextualize-estimate-only", is_flag=True,
               help="Print cost/time estimate for contextual generation, then exit.")
+@click.option("-y", "--yes", is_flag=True,
+              help="Skip confirmation prompt and proceed immediately.")
 @click.pass_context
 def ingest(
     ctx: click.Context,
     refresh: bool,
     reset: bool,
     contextualize: bool,
+    recontext: bool,
+    recontext_file: str | None,
     contextualize_estimate_only: bool,
+    yes: bool,
 ) -> None:
     """Scan the documents folder and ingest new or changed files.
 
-    Files whose SHA-256 hash has not changed since the last ingest are
-    skipped. Changed files are deleted from the store and re-indexed.
-    Files that have been removed from disk are also cleaned up.
+    \b
+    embd ingest                              embed new/changed files
+    embd ingest --contextualize              embed, then contextualize un-done files
+    embd ingest --recontext                  re-contextualize ALL files from scratch
+    embd ingest --recontext-file report.pdf  re-contextualize one specific file
+    embd ingest -y                           skip confirmation prompt
 
-    A BM25 keyword index is built after every run that modifies the store.
+    --contextualize processes every file not yet contextualized (new +
+    previously ingested). --recontext resets all contextual state first,
+    then contextualizes everything. Interrupted runs resume where they left off.
     """
     cfg: Config = ctx.obj["config"]
     from .ingestion.ingest import _source_key
@@ -122,6 +137,49 @@ def ingest(
     meta_db = MetaDB(cfg.paths.db_dir / "embd_meta.db")
     docs_dir = cfg.paths.documents_dir
 
+    # --recontext / --recontext-file imply --contextualize
+    if recontext or recontext_file:
+        contextualize = True
+
+    # --recontext-file: re-contextualize a single file and exit
+    if recontext_file:
+        row = meta_db.get_file(recontext_file)
+        if not row:
+            click.echo(f"File '{recontext_file}' not found in index. Run `embd ingest` first.")
+            meta_db.close()
+            return
+        file_path = cfg.paths.documents_dir / recontext_file
+        if not file_path.exists():
+            click.echo(f"Source file not found on disk: {file_path}")
+            meta_db.close()
+            return
+        meta_db.reset_contextual(recontext_file)
+        click.echo(f"Reset contextual state for '{recontext_file}'.")
+        encoder = Encoder(cfg.embedding.model_name, cfg.embedding.device)
+        from .ingestion.contextual import _contextualize_one_file
+        ctx_cfg = cfg.ingestion.contextual
+        _contextualize_one_file(
+            recontext_file, file_path, store, encoder, meta_db, cfg,
+            backend=ctx_cfg.backend,
+            max_doc_tokens=ctx_cfg.max_doc_tokens,
+            window_chunks=ctx_cfg.window_chunks,
+        )
+        meta_db.close()
+        return
+
+    # --recontext: reset ALL contextual state
+    if recontext:
+        n_reset = sum(1 for f in meta_db.get_all_files().values() if f.get("contextual_done"))
+        if n_reset:
+            if not yes and sys.stdin.isatty():
+                click.confirm(
+                    f"This will reset contextual state for {n_reset} files and re-contextualize all.\n"
+                    "Continue?",
+                    abort=True,
+                )
+            meta_db.reset_all_contextual()
+            click.echo(f"Reset contextual state for {n_reset} files.")
+
     # --contextualize-estimate-only: print estimate and exit
     if contextualize_estimate_only:
         from .ingestion.contextual import estimate_contextualization, print_estimate
@@ -132,7 +190,7 @@ def ingest(
 
     # --reset: drop everything, prompt for confirmation
     if reset:
-        if sys.stdin.isatty():
+        if not yes and sys.stdin.isatty():
             click.confirm(
                 "This will DELETE all embeddings and re-ingest from scratch.\n"
                 f"  DB: {cfg.paths.db_dir}\n"
@@ -147,21 +205,98 @@ def ingest(
         meta_db.reset()
         click.echo(f"Cleared collection '{cfg.retrieval.collection_name}'.")
 
+    # ---- Scan ----
+    # For --refresh/--reset, ignore stored state to force re-check
+    if refresh:
+        known_files: dict[str, str] = {}
+    else:
+        known_files = store.get_known_files()
+
+    exts = get_supported_extensions(cfg.ingestion.enabled_types)
+    scan = scan_documents(
+        cfg.paths.documents_dir, known_files, exts,
+        ignore_patterns=cfg.ingestion.ignore_patterns,
+    )
+
+    to_process = scan.to_add + scan.to_update
+    n_existing = len(known_files) - len(scan.to_update) - len(scan.to_remove)
+
+    # ---- Nothing new to embed ----
+    if not to_process and not scan.to_remove:
+        if not contextualize:
+            click.echo("Nothing to ingest — all files are up to date.")
+            meta_db.close()
+            return
+        # --contextualize with nothing new: run pass 2 only
+        uncontext = meta_db.get_uncontext_files()
+        if not uncontext:
+            click.echo("Nothing to ingest and all files already contextualized.")
+            meta_db.close()
+            return
+        click.echo(f"Nothing new to embed. {len(uncontext)} file(s) to contextualize.")
+        if not yes and sys.stdin.isatty():
+            click.confirm("Proceed?", abort=True)
+        encoder = Encoder(cfg.embedding.model_name, cfg.embedding.device)
+        from .ingestion.contextual import contextualize_files
+        contextualize_files(store, encoder, meta_db, cfg)
+        meta_db.close()
+        return
+
+    # Count files by extension for the summary
+    from collections import Counter
+    ext_new: Counter[str] = Counter(p.suffix.lower() for p in scan.to_add)
+    ext_upd: Counter[str] = Counter(p.suffix.lower() for p in scan.to_update)
+
+    click.echo()
+    click.echo("  ── scan ──")
+    click.echo(f"  documents dir:  {cfg.paths.documents_dir}")
+    click.echo(f"  unchanged:      {n_existing} files (skipped)")
+    if scan.to_add:
+        types = ", ".join(f"{e} {n}" for e, n in sorted(ext_new.items()))
+        click.echo(f"  new:            {len(scan.to_add)} files  ({types})")
+    if scan.to_update:
+        types = ", ".join(f"{e} {n}" for e, n in sorted(ext_upd.items()))
+        click.echo(f"  changed:        {len(scan.to_update)} files  ({types})")
+    if scan.to_remove:
+        click.echo(f"  removed:        {len(scan.to_remove)} files")
+
+    click.echo()
+    click.echo("  ── embed ──")
+    click.echo(f"  model:          {cfg.embedding.model_name}")
+    click.echo(f"  device:         {cfg.embedding.device}")
+    click.echo(f"  chunk size:     {cfg.ingestion.chunk_size} chars, {cfg.ingestion.chunk_overlap} overlap")
+    ocr_mode = cfg.ingestion.ocr_embedded_images
+    click.echo(f"  image OCR:      {ocr_mode} (backend={cfg.ingestion.ocr_backend})")
+
+    if contextualize:
+        ctx_cfg = cfg.ingestion.contextual
+        model_name = {
+            "ollama": ctx_cfg.ollama_model,
+            "claude": ctx_cfg.claude_model,
+            "mlx": ctx_cfg.mlx_model,
+        }.get(ctx_cfg.backend, ctx_cfg.backend)
+        # Count how many files will need contextualizing after pass 1
+        n_already_ctx = sum(
+            1 for f in meta_db.get_all_files().values() if f.get("contextual_done")
+        )
+        n_will_ctx = (n_existing - n_already_ctx) + len(to_process)
+        click.echo()
+        click.echo("  ── contextualize ──")
+        click.echo(f"  backend:        {ctx_cfg.backend}")
+        click.echo(f"  model:          {model_name}")
+        click.echo(f"  to process:     {n_will_ctx} files  ({n_already_ctx} already done, skipped)")
+        strategy = f"sliding window (>{ctx_cfg.max_doc_tokens} tokens)"
+        click.echo(f"  large docs:     {strategy}")
+    click.echo()
+
+    # ---- Confirm ----
+    if not yes and sys.stdin.isatty():
+        click.confirm("Proceed?", abort=True)
+
+    # ---- Pass 1: embed ----
     encoder = Encoder(cfg.embedding.model_name, cfg.embedding.device)
 
     with Timer("total") as total_timer:
-        # For --refresh/--reset, ignore stored state to force re-check
-        if refresh:
-            known_files: dict[str, str] = {}
-        else:
-            known_files = store.get_known_files()
-
-        exts = get_supported_extensions(cfg.ingestion.enabled_types)
-        scan = scan_documents(
-            cfg.paths.documents_dir, known_files, exts,
-            ignore_patterns=cfg.ingestion.ignore_patterns,
-        )
-
         # Delete stale data before re-ingesting changed files
         for path in scan.to_update:
             sk = _source_key(path, docs_dir)
@@ -173,57 +308,57 @@ def ingest(
             store.delete_file(name)
             meta_db.remove_file(name)
 
-        to_process = scan.to_add + scan.to_update
-        modified = bool(to_process or scan.to_remove)
+        total_chunks = 0
+        embed_elapsed = 0.0
 
-        if not to_process and not scan.to_remove:
-            click.echo("Nothing to ingest — all files are up to date.")
-        else:
-            total_chunks = 0
-            embed_elapsed = 0.0
+        for i, pdf_path in enumerate(to_process, start=1):
+            src_key = _source_key(pdf_path, docs_dir)
+            click.echo(f"[{i}/{len(to_process)}] {src_key} ...")
+            result = _ingest_file_core(
+                pdf_path, store, encoder, cfg, source_name=src_key,
+            )
+            if result is None:
+                click.echo("  skipped (no extractable text)")
+                continue
+            total_chunks += result.n_chunks
+            embed_elapsed += result.embed_s
+            click.echo(f"  → {result.n_chunks} chunks, embed {result.embed_s:.1f}s")
 
-            for i, pdf_path in enumerate(to_process, start=1):
-                src_key = _source_key(pdf_path, docs_dir)
-                click.echo(f"[{i}/{len(to_process)}] {src_key} ...")
-                result = _ingest_file_core(
-                    pdf_path, store, encoder, cfg, source_name=src_key,
-                )
-                if result is None:
-                    click.echo("  skipped (no extractable text)")
-                    continue
-                total_chunks += result.n_chunks
-                embed_elapsed += result.embed_s
-                click.echo(f"  → {result.n_chunks} chunks, embed {result.embed_s:.1f}s")
-
-                # Sync to SQLite
-                mtime = pdf_path.stat().st_mtime
-                file_hash = hash_file(pdf_path)
-                meta_db.upsert_file(
-                    source_key=src_key,
-                    file_hash=file_hash,
-                    mtime=mtime,
-                    char_count=result.char_count,
-                    chunk_count=result.n_chunks,
-                )
-
-            print_ingest_report(
-                n_new=len(scan.to_add),
-                n_updated=len(scan.to_update),
-                n_removed=len(scan.to_remove),
-                n_chunks=total_chunks,
-                embed_s=embed_elapsed,
-                total_s=total_timer.elapsed,
+            # Sync to SQLite
+            mtime = pdf_path.stat().st_mtime
+            file_hash = hash_file(pdf_path)
+            meta_db.upsert_file(
+                source_key=src_key,
+                file_hash=file_hash,
+                mtime=mtime,
+                char_count=result.char_count,
+                chunk_count=result.n_chunks,
+                file_type=pdf_path.suffix.lower(),
+                extract_s=result.extract_s,
+                embed_s=result.embed_s,
+                upsert_s=result.upsert_s,
+                embedding_model=cfg.embedding.model_name,
             )
 
-        # Build BM25 index after any modifications
-        if modified:
-            click.echo("Building BM25 index ...")
-            with Timer("bm25") as bm25_timer:
-                build_and_save_bm25(store, cfg.paths.db_dir)
-            click.echo(f"BM25 index built in {bm25_timer.elapsed:.1f}s")
+        print_ingest_report(
+            n_new=len(scan.to_add),
+            n_updated=len(scan.to_update),
+            n_removed=len(scan.to_remove),
+            n_chunks=total_chunks,
+            embed_s=embed_elapsed,
+            total_s=total_timer.elapsed,
+        )
 
-    # --contextualize: run after ingest
-    if contextualize or cfg.ingestion.contextual_ingestion:
+        # Build BM25 index after any modifications
+        click.echo("Building BM25 index ...")
+        with Timer("bm25") as bm25_timer:
+            build_and_save_bm25(store, cfg.paths.db_dir)
+        click.echo(f"BM25 index built in {bm25_timer.elapsed:.1f}s")
+
+    # ---- Pass 2: contextualize (only when explicitly requested) ----
+    # Each file is processed in two phases: LLM generation (phase A), then
+    # re-embedding (phase B).  Only one model uses the GPU at a time.
+    if contextualize:
         from .ingestion.contextual import contextualize_files
         contextualize_files(store, encoder, meta_db, cfg)
 
@@ -307,8 +442,9 @@ def ingest_url(ctx: click.Context, url: str) -> None:
 
 @cli.command()
 @click.argument("question")
+@click.option("--diag", is_flag=True, help="Show retrieval diagnostics (RRF scores, sources).")
 @click.pass_context
-def query(ctx: click.Context, question: str) -> None:
+def query(ctx: click.Context, question: str, diag: bool) -> None:
     """Ask a question against all indexed documents.
 
     Retrieves the most relevant chunks, then generates a grounded answer
@@ -335,13 +471,15 @@ def query(ctx: click.Context, question: str) -> None:
             fetch_k = cfg.retrieval.top_k * 2
             semantic_hits = store.query(query_vec, top_k=fetch_k)
             bm25_hits = bm25.query(question, top_k=fetch_k)
-            hits = rrf_merge(
+            merge = rrf_merge(
                 semantic_hits, bm25_hits, store,
                 semantic_weight=cfg.retrieval.semantic_weight,
                 bm25_weight=cfg.retrieval.bm25_weight,
                 top_k=cfg.retrieval.top_k,
             )
+            hits = merge.results
         else:
+            merge = None
             hits = store.query(query_vec, top_k=cfg.retrieval.top_k)
     retrieve_ms = retrieve_timer.elapsed * 1000
 
@@ -386,6 +524,23 @@ def query(ctx: click.Context, question: str) -> None:
         usage=usage,
         top_k=cfg.retrieval.top_k,
     )
+
+    if diag and merge is not None:
+        click.echo()
+        click.echo("  ── retrieval diagnostics ──")
+        click.echo(f"  weights: semantic={cfg.retrieval.semantic_weight}, bm25={cfg.retrieval.bm25_weight}")
+        click.echo(f"  {'#':<3s} {'source':<15s} {'sem_rank':>8s} {'bm25_rank':>9s} {'sem':>7s} {'bm25':>7s} {'rrf':>7s}  file")
+        for i, d in enumerate(merge.diag, 1):
+            sr = str(d.semantic_rank + 1) if d.semantic_rank is not None else "—"
+            br = str(d.bm25_rank + 1) if d.bm25_rank is not None else "—"
+            # Get source filename from the hit
+            src_file = hits[i - 1]["metadata"].get("source_filename", "") if i <= len(hits) else ""
+            click.echo(
+                f"  {i:<3d} {d.source:<15s} {sr:>8s} {br:>9s} "
+                f"{d.semantic_contrib:>7.4f} {d.bm25_contrib:>7.4f} {d.rrf_score:>7.4f}  {src_file}"
+            )
+    elif diag:
+        click.echo("\n  (pure semantic search — no BM25 index loaded, no RRF diagnostics)")
 
 
 def _make_generator(cfg: Config):
@@ -530,6 +685,147 @@ def delete(ctx: click.Context, filename: str) -> None:
         click.echo(f"Deleted {count} chunk(s) for '{filename}'.")
     else:
         click.echo(f"No indexed chunks found for '{filename}'. Nothing deleted.")
+
+
+# ---------------------------------------------------------------------------
+# stats
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.pass_context
+def stats(ctx: click.Context) -> None:
+    """Show index statistics: files, chunks, storage, timing, and contextual status."""
+    cfg: Config = ctx.obj["config"]
+    from .store.meta_db import MetaDB
+
+    store = VectorStore(cfg.paths.db_dir, cfg.retrieval.collection_name)
+    meta_db = MetaDB(cfg.paths.db_dir / "embd_meta.db")
+    all_files = meta_db.get_all_files()
+
+    total_chunks = store.count()
+    n_files = len(all_files)
+
+    if n_files == 0:
+        click.echo("No files indexed. Run `embd ingest` first.")
+        meta_db.close()
+        return
+
+    # Aggregate stats
+    total_chars = sum(f.get("char_count") or 0 for f in all_files.values())
+    total_tokens = sum(f.get("token_count") or 0 for f in all_files.values())
+    n_ctx_done = sum(1 for f in all_files.values() if f.get("contextual_done"))
+    n_missing = sum(1 for f in all_files.values() if f.get("source_missing"))
+
+    # By file type
+    from collections import Counter, defaultdict
+    type_counts: Counter[str] = Counter()
+    type_chunks: Counter[str] = Counter()
+    type_chars: Counter[str] = Counter()
+    for f in all_files.values():
+        ft = f.get("file_type") or "unknown"
+        type_counts[ft] += 1
+        type_chunks[ft] += f.get("chunk_count") or 0
+        type_chars[ft] += f.get("char_count") or 0
+
+    # Timing stats (only files with timing data)
+    files_with_timing = [f for f in all_files.values() if f.get("embed_s") is not None]
+    total_extract = sum(f["extract_s"] for f in files_with_timing if f.get("extract_s"))
+    total_embed = sum(f["embed_s"] for f in files_with_timing if f.get("embed_s"))
+    total_upsert = sum(f["upsert_s"] for f in files_with_timing if f.get("upsert_s"))
+
+    # Embedding models used
+    models_used: Counter[str] = Counter()
+    for f in all_files.values():
+        m = f.get("embedding_model")
+        if m:
+            models_used[m] += 1
+
+    # Storage on disk
+    db_dir = cfg.paths.db_dir
+    db_size_mb = 0.0
+    if db_dir.exists():
+        for p in db_dir.rglob("*"):
+            if p.is_file():
+                db_size_mb += p.stat().st_size
+        db_size_mb /= 1024 * 1024
+
+    # --- Output ---
+    click.echo()
+    click.echo("  ── index ──")
+    click.echo(f"  files:          {n_files}")
+    click.echo(f"  chunks:         {total_chunks:,}")
+    click.echo(f"  characters:     {total_chars:,}")
+    click.echo(f"  tokens (est):   {total_tokens:,}")
+    click.echo(f"  storage:        {db_size_mb:.1f} MB  ({db_dir})")
+
+    click.echo()
+    click.echo("  ── by file type ──")
+    click.echo(f"  {'type':<10s} {'files':>6s} {'chunks':>8s} {'chars':>12s}")
+    for ft in sorted(type_counts, key=lambda t: -type_counts[t]):
+        click.echo(f"  {ft:<10s} {type_counts[ft]:>6d} {type_chunks[ft]:>8d} {type_chars[ft]:>12,d}")
+
+    if models_used:
+        click.echo()
+        click.echo("  ── embedding models ──")
+        for m, cnt in models_used.most_common():
+            click.echo(f"  {m}  ({cnt} files)")
+
+    click.echo()
+    click.echo("  ── contextual ──")
+    click.echo(f"  done:           {n_ctx_done} / {n_files} files")
+    if n_ctx_done > 0:
+        ctx_files = [f for f in all_files.values() if f.get("contextual_done")]
+        backends_used: Counter[str] = Counter()
+        total_ctx_tokens = 0
+        total_ctx_cost = 0.0
+        for f in ctx_files:
+            b = f.get("contextual_backend") or "unknown"
+            backends_used[b] += 1
+            total_ctx_tokens += f.get("context_tokens_used") or 0
+            total_ctx_cost += f.get("context_cost_usd") or 0.0
+        for b, cnt in backends_used.most_common():
+            click.echo(f"  {b}:  {cnt} files")
+        if total_ctx_tokens:
+            click.echo(f"  tokens used:    {total_ctx_tokens:,}")
+        if total_ctx_cost > 0:
+            click.echo(f"  API cost:       ${total_ctx_cost:.4f}")
+    if n_missing:
+        click.echo(f"  source missing: {n_missing} files (source deleted from disk)")
+
+    if files_with_timing:
+        click.echo()
+        click.echo("  ── ingest timing (cumulative) ──")
+        click.echo(f"  extract:        {total_extract:.1f}s")
+        click.echo(f"  embed:          {total_embed:.1f}s")
+        click.echo(f"  upsert:         {total_upsert:.1f}s")
+
+        # Per-type averages
+        click.echo()
+        click.echo("  ── avg time per file by type ──")
+        click.echo(f"  {'type':<10s} {'extract':>8s} {'embed':>8s} {'upsert':>8s} {'files':>6s}")
+        type_timing: dict[str, list] = defaultdict(list)
+        for f in files_with_timing:
+            ft = f.get("file_type") or "unknown"
+            type_timing[ft].append(f)
+        for ft in sorted(type_timing, key=lambda t: -len(type_timing[t])):
+            files_t = type_timing[ft]
+            n = len(files_t)
+            avg_e = sum(f.get("extract_s") or 0 for f in files_t) / n
+            avg_m = sum(f.get("embed_s") or 0 for f in files_t) / n
+            avg_u = sum(f.get("upsert_s") or 0 for f in files_t) / n
+            click.echo(f"  {ft:<10s} {avg_e:>7.2f}s {avg_m:>7.2f}s {avg_u:>7.2f}s {n:>6d}")
+
+    # BM25 index
+    from .ingestion.bm25_index import BM25_FILENAME
+    bm25_path = db_dir / BM25_FILENAME
+    if bm25_path.exists():
+        bm25_mb = bm25_path.stat().st_size / 1024 / 1024
+        click.echo()
+        click.echo(f"  ── BM25 index ──")
+        click.echo(f"  size:           {bm25_mb:.1f} MB")
+
+    click.echo()
+    meta_db.close()
 
 
 # ---------------------------------------------------------------------------

@@ -27,14 +27,14 @@ Chunk IDs are deterministic from `(source_key, page, chunk_index)` — re-ingest
 
 ### Contextual generation (optional)
 
-When `--contextualize` is passed (or `contextual_ingestion = true`):
+When `--contextualize` is passed, contextualisation runs as a **second pass** after all embedding is complete. This ensures only one model uses the GPU at a time (embedding model during pass 1, LLM during pass 2).
 
-1. For each un-contextualized file, extract full document text from disk.
-2. For each chunk, send `(document_text, chunk_text)` to an LLM (Claude Haiku or Ollama).
-3. The LLM returns a ~75-token context string that situates the chunk within the document.
-4. Prepend context to chunk text, re-embed with the same model, update ChromaDB in place.
+1. **Pass 1** completes normally — all chunks are embedded and searchable via semantic + BM25 hybrid search.
+2. **Pass 2** iterates un-contextualized files: re-parses each from disk (~0.1s/file, negligible), sends each chunk + full document text to an LLM, prepends the returned ~75-token context string, re-embeds, and updates ChromaDB in place.
 
-For documents exceeding `contextual_max_doc_tokens`, a sliding window of surrounding chunks replaces the full document text. Progress is tracked per-file in SQLite — interrupted runs resume automatically.
+Models for context generation are configured independently in `[ingestion.contextual]` — you can use a small/cheap model (e.g., Haiku, qwen3:4b) for context while using a larger model for answering in `[llm]`.
+
+For documents exceeding `max_doc_tokens`, a sliding window of surrounding chunks replaces the full document text. Progress is tracked per-file in SQLite — interrupted runs resume automatically.
 
 Claude backend uses `cache_control: ephemeral` for prompt caching, so repeated calls for chunks from the same document hit the cache at 1/10th input cost.
 

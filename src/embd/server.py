@@ -455,7 +455,7 @@ Every factual claim drawn from a passage **must** carry an inline citation using
                     semantic_weight=cfg.retrieval.semantic_weight,
                     bm25_weight=cfg.retrieval.bm25_weight,
                     top_k=top_k,
-                )
+                ).results
             else:
                 hits = store.query(vec, top_k=top_k, where=where)
 

@@ -45,25 +45,55 @@ ignore_patterns = [
     "*.pyc", "*.pyo", "*.o", "*.so", "*.dylib", "*.class", "*.jar",
 ]
 
-# Contextual ingestion — generates a situating context string per chunk
-# before embedding. One LLM call per chunk at ingest time (one-time cost).
+# ---------------------------------------------------------------------------
+# Contextual generation — LLM-generated context prepended to each chunk
+# ---------------------------------------------------------------------------
 #
-# contextual_ingestion: set true to always contextualize on ingest.
-#   Leave false and use --contextualize flag for explicit opt-in.
+# During ingest, each chunk is sent (alongside the full document or a
+# sliding window) to an LLM, which returns a short ~75-token summary
+# that situates the chunk within its document. This context is prepended
+# to the chunk text *before* embedding, improving retrieval for ambiguous
+# or context-dependent passages. One LLM call per chunk (one-time cost).
 #
-# contextual_backend: LLM for context generation.
-#   "claude" — fast, cheap with prompt caching. Uses claude-haiku-4-5.
-#   "ollama" — local, free, no API cost, slower. Uses ollama_model from [llm].
+# Models here are INDEPENDENT from [llm] — you can use a small, cheap
+# model for context generation while using a larger model for answering.
+# Only ollama_host is shared (from [llm]) since it's the same server.
+[ingestion.contextual]
+# Contextual generation runs when you pass --contextualize to `embd ingest`.
+# Settings below configure the backend and model used when it runs.
+# Already-contextualized files are always skipped.
 #
-# contextual_max_doc_tokens: documents above this use a sliding window
-#   instead of full document per chunk. Prevents context window overflow.
-#
-# contextual_window_chunks: when sliding window is active, number of
-#   surrounding chunks to include as context (prev N + next N).
-contextual_ingestion        = false
-contextual_backend          = "claude"
-contextual_max_doc_tokens   = 50000
-contextual_window_chunks    = 3
+# backend: which LLM to use for generating chunk context.
+#   "claude" — fast, cheap with prompt caching (cache_control: ephemeral).
+#              Uses claude_model below. Requires ANTHROPIC_API_KEY in .env.
+#   "ollama" — local, free, no API cost, slower. Uses ollama_model below.
+#              Connects to the Ollama server at [llm].ollama_host.
+#   "mlx"   — Apple Silicon only, native Metal acceleration, no server needed.
+#              Uses mlx_model below. Requires: pip install 'embd[mlx]'
+backend       = "ollama"
+# ollama_model: Ollama model for context generation. Can differ from [llm].ollama_model.
+# A small, fast model works well here — context strings are short (~75 tokens).
+# Good choices: "qwen3:4b" (fast, 2.5 GB), "phi4-mini" (2.5 GB), "llama3.2" (2 GB).
+ollama_model  = "qwen3:4b"
+# claude_model: Claude model for context generation. Haiku is recommended —
+# it's the cheapest option and context strings don't need a large model.
+# Prompt caching makes repeated calls for chunks of the same doc ~10x cheaper.
+claude_model  = "claude-haiku-4-5-20251001"
+# mlx_model: MLX model for context generation (Apple Silicon only).
+# Can differ from [llm].mlx_model. A small 4-bit model is ideal — context
+# strings are short (~75 tokens) and don't need a large model.
+# Downloaded once from HuggingFace to ~/.cache/huggingface/ on first run.
+# Good choices: Llama-3.2-3B (~2 GB), Qwen2.5-3B (~2 GB), Mistral-7B (~4 GB).
+mlx_model     = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+# max_doc_tokens: documents above this threshold use a sliding window of
+# surrounding chunks instead of the full document text per LLM call.
+# Prevents context-window overflow and keeps costs predictable for very
+# large documents. Rough heuristic: 1 token ≈ 4 characters.
+max_doc_tokens  = 50000
+# window_chunks: when sliding window is active, how many chunks before
+# and after the current chunk to include as surrounding context.
+# E.g., 3 means: 3 before + current + 3 after = 7 chunks per call.
+window_chunks   = 3
 
 [embedding]
 # BGE-M3: 1024-dim, multilingual, 8192-token context, normalized by default.
@@ -87,7 +117,7 @@ bm25_weight     = 0.2
 # backend: "mlx" (Apple Silicon only — requires pip install 'embd[mlx]'),
 #          "ollama" (any platform), or "claude" (API, any platform)
 # Apple Silicon: change to "mlx" and install embd[mlx]
-backend     = "ollama"
+backend     = "mlx"
 
 # --- MLX settings (used when backend = "mlx") ---
 # Model is downloaded once from HuggingFace to ~/.cache/huggingface/ on first run.

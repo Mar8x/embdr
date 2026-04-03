@@ -59,6 +59,10 @@ def ingest_file(
 
     Returns None when the file has no extractable text.
     When *delete_existing* is True, removes old chunks for this source first.
+
+    Contextual generation is NOT done here — it runs as a separate pass
+    after all files are ingested, so only one model uses the GPU at a time.
+    See ``contextualize_files()`` in ``contextual.py``.
     """
     if source_name is None:
         source_name = _source_key(path, cfg.paths.documents_dir)

@@ -22,12 +22,18 @@ def meta_db(tmp_path):
     db.close()
 
 
+class _FakeContextualCfg:
+    backend = "claude"
+    ollama_model = "qwen3:4b"
+    claude_model = "claude-haiku-4-5-20251001"
+    max_doc_tokens = 50000
+    window_chunks = 3
+
+
 class _FakeCfg:
     """Minimal config substitute for estimation tests."""
     class ingestion:
-        contextual_backend = "claude"
-        contextual_max_doc_tokens = 50000
-        contextual_window_chunks = 3
+        contextual = _FakeContextualCfg()
     class llm:
         ollama_model = "llama3.2"
 
@@ -104,7 +110,7 @@ class TestOllamaEstimation:
         meta_db.upsert_file("doc.pdf", "h1", 100.0, 8000, 20)
 
         cfg = _FakeCfg()
-        cfg.ingestion.contextual_backend = "ollama"
+        cfg.ingestion.contextual.backend = "ollama"
         result = estimate_contextualization(meta_db, cfg)
 
         f = result.files[0]
@@ -115,10 +121,10 @@ class TestOllamaEstimation:
 
     def test_time_with_benchmark(self, meta_db):
         meta_db.upsert_file("doc.pdf", "h1", 100.0, 8000, 20)
-        meta_db.upsert_benchmark("llama3.2", 60.0, 100)
+        meta_db.upsert_benchmark("qwen3:4b", 60.0, 100)
 
         cfg = _FakeCfg()
-        cfg.ingestion.contextual_backend = "ollama"
+        cfg.ingestion.contextual.backend = "ollama"
         result = estimate_contextualization(meta_db, cfg)
 
         f = result.files[0]

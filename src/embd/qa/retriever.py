@@ -71,7 +71,7 @@ class Retriever:
                 semantic_weight=self._semantic_weight,
                 bm25_weight=self._bm25_weight,
                 top_k=self._top_k,
-            )
+            ).results
         else:
             hits = self._store.query(embedding, top_k=self._top_k)
 

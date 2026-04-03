@@ -832,7 +832,7 @@ class EmbdShell(App[None]):
                 semantic_weight=cfg.retrieval.semantic_weight,
                 bm25_weight=cfg.retrieval.bm25_weight,
                 top_k=top_k,
-            )
+            ).results
         return self._store.query(query_vec, top_k=top_k)
 
     @staticmethod

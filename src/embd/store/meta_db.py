@@ -43,11 +43,17 @@ class MetaDB:
     _FILES_DDL = """\
 CREATE TABLE IF NOT EXISTS files (
     source_key          TEXT PRIMARY KEY,
+    file_type           TEXT,
     file_hash           TEXT,
     mtime               REAL,
     char_count          INTEGER,
     token_count         INTEGER,
     chunk_count         INTEGER,
+    extract_s           REAL,
+    embed_s             REAL,
+    upsert_s            REAL,
+    ingested_at         TEXT,
+    embedding_model     TEXT,
     contextual_done     INTEGER DEFAULT 0,
     contextual_at       TEXT,
     contextual_backend  TEXT,
@@ -69,11 +75,17 @@ CREATE TABLE IF NOT EXISTS ollama_benchmarks (
 
     # Columns that may not exist in older databases — added idempotently.
     _FILES_COLUMNS = [
+        ("file_type", "TEXT"),
         ("file_hash", "TEXT"),
         ("mtime", "REAL"),
         ("char_count", "INTEGER"),
         ("token_count", "INTEGER"),
         ("chunk_count", "INTEGER"),
+        ("extract_s", "REAL"),
+        ("embed_s", "REAL"),
+        ("upsert_s", "REAL"),
+        ("ingested_at", "TEXT"),
+        ("embedding_model", "TEXT"),
         ("contextual_done", "INTEGER DEFAULT 0"),
         ("contextual_at", "TEXT"),
         ("contextual_backend", "TEXT"),
@@ -109,20 +121,34 @@ CREATE TABLE IF NOT EXISTS ollama_benchmarks (
         mtime: float,
         char_count: int,
         chunk_count: int,
+        file_type: str | None = None,
+        extract_s: float | None = None,
+        embed_s: float | None = None,
+        upsert_s: float | None = None,
+        embedding_model: str | None = None,
     ) -> None:
         """Insert or update a file's stats.  ``token_count`` = ``char_count // 4``."""
+        now = datetime.now(timezone.utc).isoformat()
         self._conn.execute(
             """\
-INSERT INTO files (source_key, file_hash, mtime, char_count, token_count, chunk_count)
-VALUES (?, ?, ?, ?, ?, ?)
+INSERT INTO files (source_key, file_type, file_hash, mtime, char_count, token_count,
+                   chunk_count, extract_s, embed_s, upsert_s, ingested_at, embedding_model)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(source_key) DO UPDATE SET
-    file_hash   = excluded.file_hash,
-    mtime       = excluded.mtime,
-    char_count  = excluded.char_count,
-    token_count = excluded.token_count,
-    chunk_count = excluded.chunk_count
+    file_type       = excluded.file_type,
+    file_hash       = excluded.file_hash,
+    mtime           = excluded.mtime,
+    char_count      = excluded.char_count,
+    token_count     = excluded.token_count,
+    chunk_count     = excluded.chunk_count,
+    extract_s       = excluded.extract_s,
+    embed_s         = excluded.embed_s,
+    upsert_s        = excluded.upsert_s,
+    ingested_at     = excluded.ingested_at,
+    embedding_model = excluded.embedding_model
 """,
-            (source_key, file_hash, mtime, char_count, char_count // 4, chunk_count),
+            (source_key, file_type, file_hash, mtime, char_count, char_count // 4,
+             chunk_count, extract_s, embed_s, upsert_s, now, embedding_model),
         )
         self._conn.commit()
 
@@ -187,6 +213,16 @@ WHERE source_key = ?
 """,
             (source_key,),
         )
+        self._conn.commit()
+
+    def reset_all_contextual(self) -> None:
+        """Clear contextual state for ALL files (for --recontext)."""
+        self._conn.execute("""\
+UPDATE files SET
+    contextual_done = 0, contextual_at = NULL,
+    contextual_backend = NULL, context_tokens_used = 0,
+    context_cost_usd = 0.0, used_sliding_window = 0
+""")
         self._conn.commit()
 
     def mark_source_missing(self, source_key: str, missing: bool = True) -> None:
