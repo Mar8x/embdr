@@ -342,6 +342,11 @@ def _contextualize_one_file(
     new_texts: list[str] = []
     ctx_start = time.perf_counter()
 
+    # MLX full-doc mode: share a prompt cache across all chunks so the
+    # document prefix KV state is computed once and reused per chunk.
+    # Sliding-window mode skips this (each chunk has a unique window prefix).
+    mlx_doc_cache: list | None = [] if (backend == "mlx" and not use_sliding) else None
+
     for idx, chunk in enumerate(all_chunks):
         sys.stderr.write(f"\r    generating {idx + 1}/{n_chunks}")
         sys.stderr.flush()
@@ -373,7 +378,7 @@ def _contextualize_one_file(
             if tok_per_sec > 0:
                 total_tok_per_sec_samples.append(tok_per_sec)
         elif backend == "mlx":
-            context_str, tokens_used, tok_per_sec = _mlx_context_call(prompt, cfg)
+            context_str, tokens_used, tok_per_sec = _mlx_context_call(prompt, cfg, mlx_doc_cache)
             total_tokens_used += tokens_used
             if tok_per_sec > 0:
                 total_tok_per_sec_samples.append(tok_per_sec)
@@ -548,6 +553,7 @@ def _ollama_context_call(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             options={"temperature": 0.0, "num_predict": 150},
+            keep_alive=-1,  # keep model + KV cache hot between sequential chunk calls
         )
     except ollama.ResponseError as exc:
         if exc.status_code == 404:
@@ -594,10 +600,17 @@ _mlx_cache: dict[str, tuple] = {}
 def _mlx_context_call(
     prompt: str,
     cfg: Config,
+    doc_cache: list | None = None,
 ) -> tuple[str, int, float]:
     """Call MLX for one context generation.  Returns (context, tokens_used, tok_per_sec).
 
     Requires Apple Silicon and ``pip install 'embd[mlx]'``.
+
+    ``doc_cache`` is a mutable list used as a container for a per-document
+    prompt cache object.  Pass an empty list ``[]`` for the first chunk of a
+    document; it is populated on first call and reused for subsequent chunks,
+    allowing mlx-lm to skip re-prefilling the shared document prefix each time.
+    Pass ``None`` to disable caching (e.g. sliding-window mode).
     """
     model_path = cfg.ingestion.contextual.mlx_model
 
@@ -617,6 +630,16 @@ def _mlx_context_call(
     from mlx_lm import generate as mlx_generate  # type: ignore[import-untyped]
     from mlx_lm.sample_utils import make_sampler  # type: ignore[import-untyped]
 
+    # Lazy-create the prompt cache on the first chunk of each document
+    if doc_cache is not None and not doc_cache:
+        try:
+            from mlx_lm import make_prompt_cache  # type: ignore[import-untyped]
+            doc_cache.append(make_prompt_cache(model))
+        except Exception:
+            doc_cache.append(None)  # mlx-lm version doesn't support it; fall back
+
+    cache = doc_cache[0] if doc_cache else None
+
     # Format as chat if the tokenizer supports it
     messages = [{"role": "user", "content": prompt}]
     try:
@@ -632,6 +655,7 @@ def _mlx_context_call(
         max_tokens=150,
         sampler=make_sampler(temp=0.0),
         verbose=False,
+        prompt_cache=cache,
     )
     elapsed = time.perf_counter() - start
 
