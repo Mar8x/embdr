@@ -398,6 +398,11 @@ def _contextualize_one_file(
     if backend == "mlx" and _mlx_cache:
         _mlx_cache.clear()
         import gc; gc.collect()
+        try:
+            import mlx.core as mx
+            mx.metal.clear_cache()  # release Metal allocator buffers back to the OS
+        except Exception:
+            pass
 
     # --- Phase B: re-embed all contextualized texts and update ChromaDB ---
     # The LLM is no longer active; embedding model gets full GPU.
