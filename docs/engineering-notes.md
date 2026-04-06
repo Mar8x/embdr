@@ -92,3 +92,39 @@ At ~500 tok/s prefill speed, a 19,000-token document costs 38 seconds of prefill
 **Fix:** set `max_doc_tokens = 4000` (~16,000 chars). This pushes virtually all real-world documents into sliding window mode, capping input per call at `(2×window_chunks+1) × chunk_size` chars (~14,000 chars / ~3,500 tokens). Throughput returns to the expected 30–40 tok/s.
 
 **Claude is unaffected** — prompt caching (`cache_control: ephemeral`) makes repeated full-doc calls cheap: the document is cached after the first chunk and subsequent calls hit the cache at 1/10th input cost. The `max_doc_tokens` threshold matters only for Ollama and MLX.
+
+---
+
+## Bulk Contextualization Run: vast.ai RTX 4090 (2026-04-05)
+
+### Setup
+
+Full corpus contextualization (414 files, 27,884 chunks) was run on a rented vast.ai GPU instance rather than locally, to avoid tying up the dev machine for ~24 hours.
+
+| Item | Value |
+|---|---|
+| Hardware | NVIDIA RTX 4090 (vast.ai) |
+| Model | `qwen3:14b` via Ollama |
+| Throughput | 59 tok/s (measured, `eval_duration`) |
+| Output tokens generated | 4,175,205 (~75 tokens/chunk) |
+| Runtime | 24h 15min (2026-04-05 07:06 UTC → 2026-04-06 07:22 UTC) |
+| Instance cost | $0.3478/hr × 24.26h ≈ **$8.44** |
+| API cost | $0.00 (Ollama, local model) |
+
+### Why qwen3:14b over qwen3:4b
+
+The 14B model was chosen for the bulk run because quality compounds at scale — with 27,884 chunks, context strings that drift or hallucinate affect a large fraction of the index permanently. At 59 tok/s on the RTX 4090, the 14B model ran at roughly the same speed as qwen3:4b on Apple M4 Pro (62 tok/s), so there was no throughput penalty for the quality upgrade.
+
+On Apple Silicon, qwen3:14b would run at ~15–20 tok/s (too slow for interactive use), making a rented GPU the practical choice for large-scale runs with larger models.
+
+### Cost model for future runs
+
+At $0.35/hr for an RTX 4090 and ~27,000 chunks:
+
+| Model | GPU | tok/s | Est. time | Est. cost |
+|---|---|---|---|---|
+| qwen3:4b | RTX 4090 | ~120 tok/s | ~12h | ~$4 |
+| qwen3:14b | RTX 4090 | ~60 tok/s | ~24h | ~$8 |
+| qwen3:4b | M4 Pro | ~62 tok/s | ~24h | $0 (local) |
+
+For incremental re-contextualization of new documents, the local M4 Pro with qwen3:4b is cost-free and fast enough.
