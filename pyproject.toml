@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "embd"
-version = "0.2.0"
+version = "0.3.0"
 description = "Fully local document Q&A (RAG) system optimized for Apple Silicon"
 requires-python = ">=3.11"
 dependencies = [
