@@ -688,12 +688,162 @@ def delete(ctx: click.Context, filename: str) -> None:
     The file itself is not touched.
     """
     cfg: Config = ctx.obj["config"]
+    from .store.meta_db import MetaDB
+    from .ingestion.bm25_index import build_and_save_bm25
+
     store = VectorStore(cfg.paths.db_dir, cfg.retrieval.collection_name)
+    meta_db = MetaDB(cfg.paths.db_dir / "embd_meta.db")
     count = store.delete_file(filename)
+    meta_db.remove_file(filename)
+    meta_db.close()
     if count:
         click.echo(f"Deleted {count} chunk(s) for '{filename}'.")
+        click.echo("Rebuilding BM25 index ...")
+        build_and_save_bm25(store, cfg.paths.db_dir)
+        click.echo("Done.")
     else:
         click.echo(f"No indexed chunks found for '{filename}'. Nothing deleted.")
+
+
+# ---------------------------------------------------------------------------
+# clean
+# ---------------------------------------------------------------------------
+
+def _describe_filename(source_key: str) -> str:
+    """Derive a 3-5 word description from a source key / filename."""
+    import re
+    stem = Path(source_key).stem
+    # Split on common separators: hyphens, underscores, dots, camelCase
+    parts = re.sub(r"([a-z])([A-Z])", r"\1 \2", stem)
+    words = re.split(r"[-_.\s]+", parts)
+    # Remove pure numbers and very short tokens
+    words = [w.capitalize() for w in words if len(w) > 1 and not w.isdigit()]
+    if not words:
+        return Path(source_key).name
+    return " ".join(words[:5])
+
+
+@cli.command()
+@click.argument("source_key", required=False, default=None)
+@click.option("--purge", is_flag=True,
+              help="Remove all orphaned entries (source file no longer on disk).")
+@click.option("-y", "--yes", is_flag=True,
+              help="Skip confirmation prompt.")
+@click.pass_context
+def clean(ctx: click.Context, source_key: str | None, purge: bool, yes: bool) -> None:
+    """List indexed files and remove orphaned or specific entries.
+
+    \b
+    embd clean                  show all indexed files with status
+    embd clean --purge          remove all entries whose source file is gone
+    embd clean --purge -y       same, skip confirmation
+    embd clean papers/old.pdf   remove a specific entry by source key
+
+    The table shows each file's ingested date, type, a short description
+    derived from the filename, the source key, and whether the file still
+    exists on disk. Orphaned entries (MISSING) are highlighted.
+    """
+    cfg: Config = ctx.obj["config"]
+    from .store.meta_db import MetaDB
+    from .ingestion.bm25_index import build_and_save_bm25
+
+    store = VectorStore(cfg.paths.db_dir, cfg.retrieval.collection_name)
+    meta_db = MetaDB(cfg.paths.db_dir / "embd_meta.db")
+    docs_dir = cfg.paths.documents_dir
+
+    # --- Delete a specific entry ---
+    if source_key:
+        row = meta_db.get_file(source_key)
+        if not row:
+            click.echo(f"'{source_key}' not found in index.")
+            meta_db.close()
+            return
+        if not yes:
+            click.confirm(
+                f"Delete index entry for '{source_key}'?\n"
+                f"  This removes embeddings and metadata. The file itself is not touched.",
+                abort=True,
+            )
+        n_chunks = store.delete_file(source_key)
+        meta_db.remove_file(source_key)
+        click.echo(f"Removed '{source_key}' ({n_chunks} chunks) from index.")
+        click.echo("Rebuilding BM25 index ...")
+        build_and_save_bm25(store, cfg.paths.db_dir)
+        click.echo("Done.")
+        meta_db.close()
+        return
+
+    all_files = meta_db.get_all_files()
+    if not all_files:
+        click.echo("No files indexed. Run `embd ingest` first.")
+        meta_db.close()
+        return
+
+    rows = []
+    n_missing = 0
+    for sk, info in sorted(all_files.items(), key=lambda x: x[1].get("ingested_at") or ""):
+        missing = not (docs_dir / sk).exists()
+        if missing:
+            n_missing += 1
+        ingested = info.get("ingested_at") or ""
+        if ingested:
+            ingested = ingested[:10]
+        ftype = info.get("file_type") or "?"
+        desc = _describe_filename(sk)
+        chunks = info.get("chunk_count") or 0
+        rows.append((ingested, ftype, desc, sk, chunks, missing))
+
+    h_date, h_type, h_desc, h_source, h_chunks, h_status = (
+        "Ingested", "Type", "Description", "Source Key", "Chunks", "Status",
+    )
+    w_date = max(len(h_date), max(len(r[0]) for r in rows))
+    w_type = max(len(h_type), max(len(r[1]) for r in rows))
+    w_desc = max(len(h_desc), min(30, max(len(r[2]) for r in rows)))
+    w_src  = max(len(h_source), min(60, max(len(r[3]) for r in rows)))
+    w_chk  = max(len(h_chunks), max(len(str(r[4])) for r in rows))
+    w_stat = max(len(h_status), 7)
+
+    sep = f"  {'─' * w_date}  {'─' * w_type}  {'─' * w_desc}  {'─' * w_src}  {'─' * w_chk}  {'─' * w_stat}"
+    header = (
+        f"  {h_date:<{w_date}}  {h_type:<{w_type}}  {h_desc:<{w_desc}}"
+        f"  {h_source:<{w_src}}  {h_chunks:>{w_chk}}  {h_status:<{w_stat}}"
+    )
+
+    click.echo()
+    click.echo(header)
+    click.echo(sep)
+    for date, ftype, desc, src, chunks, missing in rows:
+        desc_t = desc[:w_desc]
+        src_t = src[:w_src]
+        status = "MISSING *" if missing else "ok"
+        line = (
+            f"  {date:<{w_date}}  {ftype:<{w_type}}  {desc_t:<{w_desc}}"
+            f"  {src_t:<{w_src}}  {chunks:>{w_chk}}  {status}"
+        )
+        click.echo(line)
+    click.echo(sep)
+    click.echo(f"  {len(rows)} files indexed, {n_missing} missing from disk")
+    click.echo()
+
+    if purge and n_missing > 0:
+        if not yes:
+            click.confirm(
+                f"Remove {n_missing} orphaned entries from index?",
+                abort=True,
+            )
+        removed_chunks = 0
+        for _date, _ftype, _desc, src, _chunks, missing in rows:
+            if missing:
+                removed_chunks += store.delete_file(src)
+                meta_db.remove_file(src)
+        click.echo(f"Purged {n_missing} entries ({removed_chunks} chunks).")
+        click.echo("Rebuilding BM25 index ...")
+        build_and_save_bm25(store, cfg.paths.db_dir)
+        click.echo("Done.")
+    elif purge and n_missing == 0:
+        click.echo("No orphaned entries to purge.")
+
+    meta_db.close()
 
 
 # ---------------------------------------------------------------------------

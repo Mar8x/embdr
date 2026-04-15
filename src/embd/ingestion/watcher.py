@@ -21,6 +21,7 @@ from watchdog.observers import Observer
 
 from ..config import Config
 from ..embedding.encoder import Encoder
+from ..store.meta_db import MetaDB
 from ..store.vector_store import VectorStore
 from .ingest import ingest_file
 from .registry import get_supported_extensions
@@ -40,11 +41,13 @@ class _IngestHandler(FileSystemEventHandler):
         store: VectorStore,
         encoder: Encoder,
         cfg: Config,
+        meta_db: MetaDB | None = None,
     ) -> None:
         super().__init__()
         self._store = store
         self._encoder = encoder
         self._cfg = cfg
+        self._meta_db = meta_db
         self._docs_dir = cfg.paths.documents_dir.resolve()
         self._supported_extensions = get_supported_extensions(cfg.ingestion.enabled_types)
         self._ignore_patterns = cfg.ingestion.ignore_patterns
@@ -152,6 +155,8 @@ class _IngestHandler(FileSystemEventHandler):
             if src_key:
                 logger.info("[watcher] File moved away: %s", src_key)
                 self._store.delete_file(src_key)
+                if self._meta_db:
+                    self._meta_db.remove_file(src_key)
         if dst.suffix.lower() in self._supported_extensions:
             dst_key = self._rel_key(dst)
             if dst_key:
@@ -169,6 +174,8 @@ class _IngestHandler(FileSystemEventHandler):
             logger.info("[watcher] File deleted: %s — removing chunks", key)
             try:
                 self._store.delete_file(key)
+                if self._meta_db:
+                    self._meta_db.remove_file(key)
                 self._schedule_bm25_rebuild()
             except Exception:
                 logger.exception("[watcher] Failed to delete chunks for %s", key)
@@ -178,6 +185,7 @@ def start_watcher(
     store: VectorStore,
     encoder: Encoder,
     cfg: Config,
+    meta_db: MetaDB | None = None,
 ) -> Observer:
     """Start a background observer on ``cfg.paths.documents_dir`` (recursive).
 
@@ -185,7 +193,7 @@ def start_watcher(
     """
     watch_dir = cfg.paths.documents_dir
     watch_dir.mkdir(parents=True, exist_ok=True)
-    handler = _IngestHandler(store, encoder, cfg)
+    handler = _IngestHandler(store, encoder, cfg, meta_db=meta_db)
     observer = Observer()
     observer.schedule(handler, str(watch_dir), recursive=True)
     observer.daemon = True

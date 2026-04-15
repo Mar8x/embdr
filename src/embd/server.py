@@ -325,7 +325,10 @@ def create_app(cfg: Config) -> FastAPI:
             store.count(),
         )
 
-        observer = start_watcher(store, encoder, cfg)
+        from .store.meta_db import MetaDB
+        meta_db = MetaDB(cfg.paths.db_dir / "embd_meta.db")
+        app.state.meta_db = meta_db
+        observer = start_watcher(store, encoder, cfg, meta_db=meta_db)
         logger.info(
             "File watcher active on %s — new/changed/deleted documents "
             "are auto-ingested (queries see updates immediately).",
@@ -336,6 +339,7 @@ def create_app(cfg: Config) -> FastAPI:
         finally:
             observer.stop()
             observer.join(timeout=5)
+            meta_db.close()
 
     _API_DESCRIPTION = """\
 ## Purpose
