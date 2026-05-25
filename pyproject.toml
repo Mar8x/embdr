@@ -38,10 +38,14 @@ ocr      = [
     "Pillow>=10.0.0",
 ]
 ocr-cpu  = ["pytesseract>=0.3.10", "Pillow>=10.0.0"]
+# MCP server — exposes embd as a tool for Claude CLI and Claude Desktop
+# httpx is already a core dependency; only the mcp SDK is added here
+mcp      = ["mcp>=1.0"]
 all      = ["embd[mlx,docx,xlsx,ocr]"]
 
 [project.scripts]
-embd = "embd.cli:cli"
+embd     = "embd.cli:cli"
+embd-mcp = "embd.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/embd"]

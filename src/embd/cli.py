@@ -9,6 +9,7 @@ Commands:
   rebuild     — drop everything and re-ingest from scratch
   shell       — interactive Textual TUI for Q&A
   serve       — HTTP retrieval API (ChatGPT Actions / OpenAI-style /query)
+  mcp-serve   — MCP server for Claude CLI / Claude Desktop (reads env vars, no config.toml)
 
 Each command prints a performance report at the end showing timing
 and memory usage, so you can see exactly where time is spent.
@@ -65,7 +66,7 @@ def _setup_logging(verbose: bool) -> None:
     "--config", "config_path",
     default="config.toml",
     show_default=True,
-    type=click.Path(exists=True),
+    type=click.Path(),
     help="Path to config.toml",
 )
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging")
@@ -74,7 +75,16 @@ def cli(ctx: click.Context, config_path: str, verbose: bool) -> None:
     """embd — fully local document Q&A, optimized for Apple Silicon."""
     _setup_logging(verbose)
     ctx.ensure_object(dict)
-    ctx.obj["config"] = load_config(Path(config_path))
+    # mcp-serve gets its configuration from environment variables, not config.toml
+    if ctx.invoked_subcommand == "mcp-serve":
+        return
+    cfg_path = Path(config_path)
+    if not cfg_path.exists():
+        raise click.BadParameter(
+            f"Config file not found: {cfg_path}",
+            param_hint="'--config'",
+        )
+    ctx.obj["config"] = load_config(cfg_path)
 
 
 # ---------------------------------------------------------------------------
@@ -985,6 +995,23 @@ def stats(ctx: click.Context) -> None:
 
     click.echo()
     meta_db.close()
+
+
+# ---------------------------------------------------------------------------
+# mcp-serve
+# ---------------------------------------------------------------------------
+
+@cli.command("mcp-serve")
+def mcp_serve() -> None:
+    """Start the MCP server (stdio transport) for Claude CLI and Claude Desktop.
+
+    Reads EMBD_BASE_URL and EMBD_API_KEY from environment — no config.toml needed.
+    This command is typically invoked by Claude, not run manually.
+
+    See docs/mcp.md for setup instructions.
+    """
+    from .mcp_server import main
+    main()
 
 
 # ---------------------------------------------------------------------------

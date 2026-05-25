@@ -5,7 +5,7 @@ skinparam componentStyle rectangle
 skinparam defaultFontName "Helvetica"
 skinparam shadowing false
 
-title embd — Architecture Overview
+title embd — Architecture Overview (Hybrid Retrieval: Semantic + BM25)
 
 actor "User" as user
 
@@ -31,6 +31,11 @@ package "Embedding" as embedding {
 }
 
 database "ChromaDB\n(local disk\ncosine / HNSW)" as chroma
+database "BM25 Index\n(rank_bm25 · pickle\nnext to chroma_db/)" as bm25
+
+package "Hybrid Retrieval" as retrieval {
+  [Reciprocal Rank Fusion\n(RRF · k=60\nconfigurable weights)] as rrf
+}
 
 package "LLM Generation" as llm {
   [MLX\n(Apple Silicon)] as mlx
@@ -41,6 +46,8 @@ package "LLM Generation" as llm {
 cloud "SearXNG\n(web search)" as searxng
 
 cloud "ChatGPT / API clients" as chatgpt
+
+cloud "Claude CLI /\nClaude Desktop" as claudecli
 
 rectangle "File Watcher\n(watchdog)" as watcher
 
@@ -56,27 +63,39 @@ scanner --> extractor
 extractor --> chunker
 chunker --> encoder
 encoder --> chroma
+ingest ..> bm25 : "(re)build after\nembed phase"
 
 webext --> encoder
 
+' Query path uses BOTH stores via RRF
 query --> encoder
-query --> chroma
+encoder --> chroma : "semantic\ntop-fetch_k"
+query --> bm25 : "keyword\ntop-fetch_k"
+chroma --> rrf
+bm25 --> rrf
+rrf --> query : "fused top-k"
 query --> llm
 
 shell --> encoder
 shell --> chroma
+shell --> bm25
+shell --> rrf
 shell --> llm
 shell --> searxng
 shell --> webext
 
 serve --> encoder
 serve --> chroma
+serve --> bm25
+serve --> rrf
 serve ..> watcher : starts
 watcher --> docs : monitors
 watcher --> encoder : auto-ingest
 watcher --> chroma : upsert/delete
+watcher ..> bm25 : "rebuild on\nchange"
 
 chatgpt --> serve : "POST /query\n(Bearer auth)"
+claudecli --> serve : "MCP search_documents\n(via embd-mcp)"
 
 config --> cli
 dotenv --> cli

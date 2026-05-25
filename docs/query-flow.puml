@@ -4,12 +4,14 @@ skinparam backgroundColor white
 skinparam defaultFontName "Helvetica"
 skinparam shadowing false
 
-title embd — Query Flow (CLI, Shell, or API)
+title embd — Query Flow (Hybrid Retrieval: Semantic + BM25)
 
 actor User
 participant "CLI / Shell / API" as entry
 participant "Encoder\n(sentence-transformers)" as encoder
 database "ChromaDB\n(HNSW cosine)" as chroma
+database "BM25 Index\n(rank_bm25)" as bm25
+participant "RRF Merger\n(k=60, weighted)" as rrf
 participant "LLM\n(MLX / Ollama / Claude)" as llm
 participant "SearXNG" as searx
 
@@ -21,10 +23,22 @@ activate encoder
 encoder --> entry : query vector
 deactivate encoder
 
-entry -> chroma : query(vector, top_k)
+== Hybrid retrieval (parallel) ==
+entry -> chroma : query(vector, fetch_k)
 activate chroma
-chroma --> entry : top-k chunks + metadata
+chroma --> entry : semantic hits\n(ranked by cosine)
 deactivate chroma
+
+entry -> bm25 : query(tokens, fetch_k)
+activate bm25
+bm25 --> entry : BM25 hits\n(ranked by score)
+deactivate bm25
+
+entry -> rrf : merge(semantic, bm25,\n  sem_weight, bm25_weight)
+activate rrf
+note right : score(d) = Σ w / (k + rank + 1)\nfor each list a doc appears in
+rrf --> entry : fused top-k chunks\n+ per-chunk diagnostics\n(sem_rank, bm25_rank, contribs)
+deactivate rrf
 
 opt /search flow
   entry -> searx : HTTP search(question)
@@ -41,4 +55,10 @@ deactivate llm
 entry --> User : answer + sources\n+ token/timing stats
 
 deactivate entry
+
+note over chroma, bm25
+  If BM25 index missing
+  or bm25_weight == 0:
+  semantic-only fallback
+end note
 @enduml

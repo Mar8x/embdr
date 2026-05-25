@@ -4,18 +4,21 @@ skinparam backgroundColor white
 skinparam defaultFontName "Helvetica"
 skinparam shadowing false
 
-title embd serve — Retrieval API + File Watcher
+title embd serve — Retrieval API + File Watcher (Hybrid Semantic + BM25)
 
-actor "ChatGPT / Client" as client
+actor "ChatGPT / Claude CLI /\nClient" as client
 participant "FastAPI\n(embd serve)" as api
 participant "Encoder\n(warmed at startup)" as encoder
 database "ChromaDB" as chroma
+database "BM25 Index\n(rank_bm25)" as bm25
+participant "RRF Merger" as rrf
 participant "File Watcher\n(watchdog)" as watcher
 collections "documents/" as docs
 
 == Startup ==
 api -> encoder : load model (warm)
 api -> chroma : open collection
+api -> bm25 : load(bm25_index.pkl)\n(graceful: None if absent)
 api -> watcher : start observer(documents/)
 
 == Query ==
@@ -24,8 +27,19 @@ activate api
 api -> api : verify Bearer
 api -> encoder : encode_query
 encoder --> api : vector
-api -> chroma : query(vector, top_k)
-chroma --> api : chunks
+
+alt BM25 loaded and bm25_weight > 0
+  api -> chroma : query(vector, fetch_k)
+  chroma --> api : semantic hits
+  api -> bm25 : query(tokens, fetch_k)
+  bm25 --> api : BM25 hits
+  api -> rrf : merge(sem, bm25, weights)
+  rrf --> api : fused top-k chunks
+else semantic-only fallback
+  api -> chroma : query(vector, top_k)
+  chroma --> api : chunks
+end
+
 api --> client : QueryResponse\n(text, metadata, score)
 deactivate api
 
@@ -35,12 +49,14 @@ activate watcher
 watcher -> encoder : encode chunks
 encoder --> watcher : embeddings
 watcher -> chroma : upsert_chunks
+watcher -> bm25 : rebuild index\nfrom store
 deactivate watcher
 note right : Next query sees\nnew chunks immediately
 
 docs -> watcher : file deleted
 activate watcher
 watcher -> chroma : delete_file
+watcher -> bm25 : rebuild index
 deactivate watcher
 
 @enduml
