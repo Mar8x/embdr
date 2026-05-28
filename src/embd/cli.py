@@ -70,6 +70,7 @@ def _setup_logging(verbose: bool) -> None:
     help="Path to config.toml",
 )
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging")
+@click.version_option(package_name="embd", prog_name="embd")
 @click.pass_context
 def cli(ctx: click.Context, config_path: str, verbose: bool) -> None:
     """embd — fully local document Q&A, optimized for Apple Silicon."""

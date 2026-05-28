@@ -1,3 +1,8 @@
 """embd — fully local document Q&A system optimized for Apple Silicon."""
 
-__version__ = "0.1.0"
+from importlib.metadata import version, PackageNotFoundError
+
+try:
+    __version__ = version("embd")
+except PackageNotFoundError:
+    __version__ = "unknown"
