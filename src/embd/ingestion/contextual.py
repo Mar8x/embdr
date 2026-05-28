@@ -277,12 +277,23 @@ def contextualize_files(
 
     for i, file_row in enumerate(uncontext, 1):
         source_key = file_row["source_key"]
-        file_path = docs_dir / source_key
+        is_url = file_row.get("source_type") == "url"
 
-        if not file_path.exists():
-            logger.warning("Source file missing: %s — skipping", source_key)
-            meta_db.mark_source_missing(source_key, True)
-            continue
+        if is_url:
+            # URLs have no source file on disk — reconstruct text from stored chunks
+            url_chunks = _get_file_chunks(store, source_key)
+            if not url_chunks:
+                logger.warning("No chunks in store for URL %s — skipping", source_key)
+                continue
+            preloaded_text: str | None = "\n\n".join(c["text"] for c in url_chunks)
+            file_path = None
+        else:
+            file_path = docs_dir / source_key
+            preloaded_text = None
+            if not file_path.exists():
+                logger.warning("Source file missing: %s — skipping", source_key)
+                meta_db.mark_source_missing(source_key, True)
+                continue
 
         click.echo(f"  [{i}/{len(uncontext)}] {source_key} ...")
 
@@ -292,6 +303,7 @@ def contextualize_files(
                 backend=backend,
                 max_doc_tokens=max_doc_tokens,
                 window_chunks=window_chunks,
+                preloaded_text=preloaded_text,
             )
         except Exception:
             logger.exception("Failed to contextualize %s — continuing", source_key)
@@ -300,7 +312,7 @@ def contextualize_files(
 
 def _contextualize_one_file(
     source_key: str,
-    file_path: Path,
+    file_path: Path | None,
     store: VectorStore,
     encoder: Encoder,
     meta_db: MetaDB,
@@ -309,19 +321,26 @@ def _contextualize_one_file(
     backend: str,
     max_doc_tokens: int,
     window_chunks: int,
+    preloaded_text: str | None = None,
 ) -> None:
-    """Contextualize all chunks of a single file."""
+    """Contextualize all chunks of a single file.
+
+    Pass ``preloaded_text`` to skip disk extraction (e.g. for URL sources).
+    """
     import sys
 
-    from .registry import extract_file
+    if preloaded_text is not None:
+        full_text = preloaded_text
+    else:
+        from .registry import extract_file
 
-    # Extract full document text (~0.1s, negligible vs LLM calls)
-    pages = extract_file(file_path, cfg.ingestion)
-    if not pages:
-        logger.warning("No text extracted from %s", source_key)
-        return
+        # Extract full document text (~0.1s, negligible vs LLM calls)
+        pages = extract_file(file_path, cfg.ingestion)
+        if not pages:
+            logger.warning("No text extracted from %s", source_key)
+            return
+        full_text = "\n\n".join(p.text for p in pages if p.text)
 
-    full_text = "\n\n".join(p.text for p in pages if p.text)
     token_count = len(full_text) // 4
     use_sliding = token_count > max_doc_tokens
 

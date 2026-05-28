@@ -30,6 +30,7 @@ K_CHUNK_SIZE = "chunk_size"
 K_CHUNK_OVL  = "chunk_overlap"
 K_DOC_DATE   = "document_date"       # ISO-8601 date string (best-effort)
 K_DOC_DATE_Q = "document_date_quality"  # "document_metadata" | "filesystem" | "none"
+K_SOURCE_TYPE = "source_type"           # "file" or "url" — URL chunks are never treated as missing
 
 
 class VectorStore:
@@ -130,6 +131,8 @@ class VectorStore:
             )
             metadatas = results["metadatas"]
             for meta in metadatas:
+                if meta.get(K_SOURCE_TYPE) == "url":
+                    continue
                 fname = meta.get(K_SOURCE, "")
                 fhash = meta.get(K_HASH, "")
                 if fname and fname not in seen:

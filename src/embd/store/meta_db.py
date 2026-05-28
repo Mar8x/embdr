@@ -43,6 +43,7 @@ class MetaDB:
     _FILES_DDL = """\
 CREATE TABLE IF NOT EXISTS files (
     source_key          TEXT PRIMARY KEY,
+    source_type         TEXT DEFAULT 'file',
     file_type           TEXT,
     file_hash           TEXT,
     mtime               REAL,
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS ollama_benchmarks (
 
     # Columns that may not exist in older databases — added idempotently.
     _FILES_COLUMNS = [
+        ("source_type", "TEXT DEFAULT 'file'"),
         ("file_type", "TEXT"),
         ("file_hash", "TEXT"),
         ("mtime", "REAL"),
@@ -163,14 +165,49 @@ ON CONFLICT(source_key) DO UPDATE SET
         return {row["source_key"]: dict(row) for row in rows}
 
     def get_known_files(self) -> dict[str, str]:
-        """Return {source_key: file_hash} for scanner change-detection."""
+        """Return {source_key: file_hash} for scanner change-detection. Excludes URL entries."""
         rows = self._conn.execute(
-            "SELECT source_key, file_hash FROM files WHERE source_missing = 0"
+            "SELECT source_key, file_hash FROM files "
+            "WHERE source_missing = 0 AND (source_type IS NULL OR source_type = 'file')"
         ).fetchall()
         return {row["source_key"]: row["file_hash"] for row in rows}
 
     def remove_file(self, source_key: str) -> None:
         self._conn.execute("DELETE FROM files WHERE source_key = ?", (source_key,))
+        self._conn.commit()
+
+    def upsert_url(
+        self,
+        source_key: str,
+        file_hash: str,
+        char_count: int,
+        chunk_count: int,
+        embedding_model: str | None = None,
+    ) -> None:
+        """Insert or update a URL entry (no mtime or file_type; source_type='url')."""
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            """\
+INSERT INTO files (source_key, source_type, file_type, file_hash, mtime, char_count,
+                   token_count, chunk_count, ingested_at, embedding_model, source_missing)
+VALUES (?, 'url', 'url', ?, 0.0, ?, ?, ?, ?, ?, 0)
+ON CONFLICT(source_key) DO UPDATE SET
+    file_hash           = excluded.file_hash,
+    char_count          = excluded.char_count,
+    token_count         = excluded.token_count,
+    chunk_count         = excluded.chunk_count,
+    ingested_at         = excluded.ingested_at,
+    embedding_model     = excluded.embedding_model,
+    source_missing      = 0,
+    contextual_done     = 0,
+    contextual_at       = NULL,
+    contextual_backend  = NULL,
+    context_tokens_used = 0,
+    context_cost_usd    = 0.0,
+    used_sliding_window = 0
+""",
+            (source_key, file_hash, char_count, char_count // 4, chunk_count, now, embedding_model),
+        )
         self._conn.commit()
 
     # ------------------------------------------------------------------

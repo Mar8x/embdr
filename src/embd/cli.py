@@ -38,7 +38,7 @@ from .qa.retriever import RetrievedChunk
 from .store.vector_store import (
     K_CHUNK_IDX, K_CHUNK_OVL, K_CHUNK_SIZE,
     K_DOC_DATE, K_DOC_DATE_Q,
-    K_HASH, K_INGESTED, K_MODEL, K_PAGE, K_SOURCE,
+    K_HASH, K_INGESTED, K_MODEL, K_PAGE, K_SOURCE, K_SOURCE_TYPE,
     VectorStore,
 )
 
@@ -70,6 +70,7 @@ def _setup_logging(verbose: bool) -> None:
     help="Path to config.toml",
 )
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging")
+@click.version_option(package_name="embd", prog_name="embd")
 @click.pass_context
 def cli(ctx: click.Context, config_path: str, verbose: bool) -> None:
     """embd — fully local document Q&A, optimized for Apple Silicon."""
@@ -160,28 +161,40 @@ def ingest(
     if recontext or recontext_file:
         contextualize = True
 
-    # --recontext-file: re-contextualize a single file and exit
+    # --recontext-file: re-contextualize a single file/URL and exit
     if recontext_file:
         row = meta_db.get_file(recontext_file)
         if not row:
-            click.echo(f"File '{recontext_file}' not found in index. Run `embd ingest` first.")
+            click.echo(f"'{recontext_file}' not found in index. Run `embd ingest` or `embd ingest-url` first.")
             meta_db.close()
             return
-        file_path = cfg.paths.documents_dir / recontext_file
-        if not file_path.exists():
-            click.echo(f"Source file not found on disk: {file_path}")
-            meta_db.close()
-            return
+        is_url = row.get("source_type") == "url"
+        from .ingestion.contextual import _contextualize_one_file, _get_file_chunks
+        if is_url:
+            url_chunks = _get_file_chunks(store, recontext_file)
+            if not url_chunks:
+                click.echo(f"No chunks found in store for '{recontext_file}'.")
+                meta_db.close()
+                return
+            file_path = None
+            preloaded_text: str | None = "\n\n".join(c["text"] for c in url_chunks)
+        else:
+            file_path = cfg.paths.documents_dir / recontext_file
+            preloaded_text = None
+            if not file_path.exists():
+                click.echo(f"Source file not found on disk: {file_path}")
+                meta_db.close()
+                return
         meta_db.reset_contextual(recontext_file)
         click.echo(f"Reset contextual state for '{recontext_file}'.")
         encoder = Encoder(cfg.embedding.model_name, cfg.embedding.device)
-        from .ingestion.contextual import _contextualize_one_file
         ctx_cfg = cfg.ingestion.contextual
         _contextualize_one_file(
             recontext_file, file_path, store, encoder, meta_db, cfg,
             backend=ctx_cfg.backend,
             max_doc_tokens=ctx_cfg.max_doc_tokens,
             window_chunks=ctx_cfg.window_chunks,
+            preloaded_text=preloaded_text,
         )
         meta_db.close()
         return
@@ -390,23 +403,34 @@ def ingest(
 
 @cli.command("ingest-url")
 @click.argument("url")
+@click.option("--contextualize", is_flag=True,
+              help="After embedding, contextualize chunks with LLM-generated context.")
 @click.pass_context
-def ingest_url(ctx: click.Context, url: str) -> None:
+def ingest_url(ctx: click.Context, url: str, contextualize: bool) -> None:
     """Fetch a web page and ingest its text into the vector store.
 
     Works with any public URL — .edu sites, blog posts, documentation, etc.
     The page content is chunked and embedded just like PDF pages.
+    Use --contextualize to have an LLM prepend a situating context to each chunk.
+
+    Ingested URLs are tracked in the index and will never be removed by
+    'embd ingest' (they are not expected to exist as local files).
+    Use 'embd clean <source-key>' or 'embd delete <source-key>' to remove them.
     """
     import hashlib
+    from .store.meta_db import MetaDB
+    from .ingestion.bm25_index import build_and_save_bm25
 
     cfg: Config = ctx.obj["config"]
     store = VectorStore(cfg.paths.db_dir, cfg.retrieval.collection_name)
+    meta_db = MetaDB(cfg.paths.db_dir / "embd_meta.db")
     encoder = Encoder(cfg.embedding.model_name, cfg.embedding.device)
 
     result = fetch_and_extract(url)
     click.echo(result.summary())
 
     if not result.ok:
+        meta_db.close()
         return
 
     source_name = url_to_source_name(url)
@@ -429,16 +453,17 @@ def ingest_url(ctx: click.Context, url: str) -> None:
     doc_date = result.document_date
     metadatas = [
         {
-            K_SOURCE:     source_name,
-            K_PAGE:       c.page_num,
-            K_CHUNK_IDX:  c.chunk_index,
-            K_INGESTED:   now,
-            K_HASH:       content_hash,
-            K_MODEL:      encoder.model_version,
-            K_CHUNK_SIZE: cfg.ingestion.chunk_size,
-            K_CHUNK_OVL:  cfg.ingestion.chunk_overlap,
-            K_DOC_DATE:   (doc_date.date or "") if doc_date else "",
-            K_DOC_DATE_Q: (doc_date.quality) if doc_date else "none",
+            K_SOURCE:      source_name,
+            K_PAGE:        c.page_num,
+            K_CHUNK_IDX:   c.chunk_index,
+            K_INGESTED:    now,
+            K_HASH:        content_hash,
+            K_MODEL:       encoder.model_version,
+            K_CHUNK_SIZE:  cfg.ingestion.chunk_size,
+            K_CHUNK_OVL:   cfg.ingestion.chunk_overlap,
+            K_DOC_DATE:    (doc_date.date or "") if doc_date else "",
+            K_DOC_DATE_Q:  (doc_date.quality) if doc_date else "none",
+            K_SOURCE_TYPE: "url",
         }
         for c in chunks
     ]
@@ -449,10 +474,38 @@ def ingest_url(ctx: click.Context, url: str) -> None:
         texts=texts,
         metadatas=metadatas,
     )
+
+    char_count = sum(len(p.text) for p in result.pages if p.text)
+    meta_db.upsert_url(
+        source_key=source_name,
+        file_hash=content_hash,
+        char_count=char_count,
+        chunk_count=len(chunks),
+        embedding_model=encoder.model_version,
+    )
+
     click.echo(
         f"Ingested {len(chunks)} chunks in {embed_timer.elapsed:.1f}s "
         f"(source: {source_name})"
     )
+
+    click.echo("Building BM25 index ...")
+    build_and_save_bm25(store, cfg.paths.db_dir)
+
+    if contextualize:
+        from .ingestion.contextual import _contextualize_one_file
+        ctx_cfg = cfg.ingestion.contextual
+        preloaded_text = "\n\n".join(p.text for p in result.pages if p.text)
+        click.echo(f"Contextualizing via {ctx_cfg.backend} ...")
+        _contextualize_one_file(
+            source_name, None, store, encoder, meta_db, cfg,
+            backend=ctx_cfg.backend,
+            max_doc_tokens=ctx_cfg.max_doc_tokens,
+            window_chunks=ctx_cfg.window_chunks,
+            preloaded_text=preloaded_text,
+        )
+
+    meta_db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -792,7 +845,13 @@ def clean(ctx: click.Context, source_key: str | None, purge: bool, yes: bool) ->
     rows = []
     n_missing = 0
     for sk, info in sorted(all_files.items(), key=lambda x: x[1].get("ingested_at") or ""):
-        missing = not (docs_dir / sk).exists()
+        is_url = info.get("source_type") == "url"
+        if is_url:
+            missing = False
+            status = "url"
+        else:
+            missing = not (docs_dir / sk).exists()
+            status = "MISSING *" if missing else "ok"
         if missing:
             n_missing += 1
         ingested = info.get("ingested_at") or ""
@@ -801,7 +860,7 @@ def clean(ctx: click.Context, source_key: str | None, purge: bool, yes: bool) ->
         ftype = info.get("file_type") or "?"
         desc = _describe_filename(sk)
         chunks = info.get("chunk_count") or 0
-        rows.append((ingested, ftype, desc, sk, chunks, missing))
+        rows.append((ingested, ftype, desc, sk, chunks, missing, status))
 
     h_date, h_type, h_desc, h_source, h_chunks, h_status = (
         "Ingested", "Type", "Description", "Source Key", "Chunks", "Status",
@@ -811,7 +870,7 @@ def clean(ctx: click.Context, source_key: str | None, purge: bool, yes: bool) ->
     w_desc = max(len(h_desc), min(30, max(len(r[2]) for r in rows)))
     w_src  = max(len(h_source), min(60, max(len(r[3]) for r in rows)))
     w_chk  = max(len(h_chunks), max(len(str(r[4])) for r in rows))
-    w_stat = max(len(h_status), 7)
+    w_stat = max(len(h_status), max(len(r[6]) for r in rows))
 
     sep = f"  {'─' * w_date}  {'─' * w_type}  {'─' * w_desc}  {'─' * w_src}  {'─' * w_chk}  {'─' * w_stat}"
     header = (
@@ -822,17 +881,16 @@ def clean(ctx: click.Context, source_key: str | None, purge: bool, yes: bool) ->
     click.echo()
     click.echo(header)
     click.echo(sep)
-    for date, ftype, desc, src, chunks, missing in rows:
+    for date, ftype, desc, src, chunks, missing, status in rows:
         desc_t = desc[:w_desc]
         src_t = src[:w_src]
-        status = "MISSING *" if missing else "ok"
         line = (
             f"  {date:<{w_date}}  {ftype:<{w_type}}  {desc_t:<{w_desc}}"
             f"  {src_t:<{w_src}}  {chunks:>{w_chk}}  {status}"
         )
         click.echo(line)
     click.echo(sep)
-    click.echo(f"  {len(rows)} files indexed, {n_missing} missing from disk")
+    click.echo(f"  {len(rows)} entries indexed, {n_missing} file(s) missing from disk")
     click.echo()
 
     if purge and n_missing > 0:
@@ -842,7 +900,7 @@ def clean(ctx: click.Context, source_key: str | None, purge: bool, yes: bool) ->
                 abort=True,
             )
         removed_chunks = 0
-        for _date, _ftype, _desc, src, _chunks, missing in rows:
+        for _date, _ftype, _desc, src, _chunks, missing, _status in rows:
             if missing:
                 removed_chunks += store.delete_file(src)
                 meta_db.remove_file(src)
