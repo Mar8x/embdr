@@ -366,6 +366,13 @@ def _contextualize_one_file(
     # Sliding-window mode skips this (each chunk has a unique window prefix).
     mlx_doc_cache: list | None = [] if (backend == "mlx" and not use_sliding) else None
 
+    # Ollama: create one client for the whole file to avoid leaking a file
+    # descriptor (SSL context) per chunk — 300+ chunks exhausts the OS limit.
+    ollama_client = None
+    if backend == "ollama":
+        import ollama as _ollama  # type: ignore[import-untyped]
+        ollama_client = _ollama.Client(host=cfg.llm.ollama_host)
+
     for idx, chunk in enumerate(all_chunks):
         sys.stderr.write(f"\r    generating {idx + 1}/{n_chunks}")
         sys.stderr.flush()
@@ -392,7 +399,7 @@ def _contextualize_one_file(
             total_tokens_used += tokens_used
             total_cost += cost
         elif backend == "ollama":
-            context_str, tokens_used, tok_per_sec = _ollama_context_call(prompt, cfg)
+            context_str, tokens_used, tok_per_sec = _ollama_context_call(prompt, cfg, ollama_client)
             total_tokens_used += tokens_used
             if tok_per_sec > 0:
                 total_tok_per_sec_samples.append(tok_per_sec)
@@ -414,6 +421,9 @@ def _contextualize_one_file(
     sys.stderr.flush()
 
     # --- Release LLM before re-embedding ---
+    if ollama_client is not None:
+        ollama_client._client.close()
+        ollama_client = None
     if backend == "mlx" and _mlx_cache:
         _mlx_cache.clear()
         import gc; gc.collect()
@@ -565,12 +575,14 @@ def _claude_context_call(
 def _ollama_context_call(
     prompt: str,
     cfg: Config,
+    client: object | None = None,
 ) -> tuple[str, int, float]:
     """Call Ollama for one context generation.  Returns (context, tokens_used, tok_per_sec)."""
     import ollama  # type: ignore[import-untyped]
 
     model = cfg.ingestion.contextual.ollama_model
-    client = ollama.Client(host=cfg.llm.ollama_host)  # shared Ollama server
+    if client is None:
+        client = ollama.Client(host=cfg.llm.ollama_host)
     start = time.perf_counter()
     try:
         response = client.chat(
