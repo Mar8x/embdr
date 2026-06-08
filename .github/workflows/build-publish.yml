@@ -1,0 +1,78 @@
+name: build-publish
+
+# Build the llmlib images (embd retrieval API + nginx), scan with Trivy, publish to GHCR.
+# PRs: build + scan only (no push, no secret) — FORK-SAFE: the GHCR login runs ONLY on push to main, so a
+# fork PR can never access GHCR_PAT. main: build + scan + push :<sha> and :latest.
+# Push targets ghcr.io/i8void and needs secret GHCR_PAT (PAT with write:packages on i8void) — embdr is under
+# Mar8x, so a cross-org token is required. Without the secret, only build+scan run.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  NAMESPACE: i8void
+
+jobs:
+  build-publish:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: llmlib            # the embd retrieval API
+            context: .
+            dockerfile: Dockerfile
+          - image: llmlib-nginx      # reverse proxy
+            context: deploy
+            dockerfile: deploy/Dockerfile.nginx
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (load for scan)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          load: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }}:${{ github.sha }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '0'   # report-only to start; flip to '1' to gate
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        env:
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+        run: |
+          if [ -z "$GHCR_PAT" ]; then
+            echo "::warning::GHCR_PAT not set — skipping push. Add a PAT (write:packages on i8void) to enable."
+            echo "PUSH=no" >> "$GITHUB_ENV"
+          else
+            echo "$GHCR_PAT" | docker login "$REGISTRY" -u i8void --password-stdin
+            echo "PUSH=yes" >> "$GITHUB_ENV"
+          fi
+
+      - name: Push image
+        if: github.event_name != 'pull_request' && env.PUSH == 'yes'
+        run: |
+          docker push "${REGISTRY}/${NAMESPACE}/${{ matrix.image }}:${{ github.sha }}"
+          docker push "${REGISTRY}/${NAMESPACE}/${{ matrix.image }}:latest"
+          echo "Pushed ${REGISTRY}/${NAMESPACE}/${{ matrix.image }} :@${{ github.sha }} + :latest"
